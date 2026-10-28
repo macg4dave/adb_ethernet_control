@@ -87,7 +87,7 @@ off together with tethering, and nothing can switch tethering back on.
 Get the code and build it:
 
 ```bash
-git clone <this repository> adb_ethernet_control
+git clone https://github.com/macg4dave/adb_ethernet_control.git adb_ethernet_control
 cd adb_ethernet_control
 cargo build --release
 ```
