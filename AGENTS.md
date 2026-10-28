@@ -10,8 +10,8 @@ on phone, network or recovery behavior. It is evidence, not a design to copy.
 Before editing, read the rules for the files you touch:
 
 - Rust (`src/`, `tests/*.rs`, `Cargo.toml`): [.claude/rules/rust.md](.claude/rules/rust.md)
-- systemd and supporting system files (`systemd/`, `udev/`, `sysusers/`):
-  [.claude/rules/systemd.md](.claude/rules/systemd.md)
+- systemd unit and the generated udev/sysusers files (`systemd/`,
+  `src/units/service.rs`, `src/commands/install.rs`): [.claude/rules/systemd.md](.claude/rules/systemd.md)
 
 ## Allowed technology
 

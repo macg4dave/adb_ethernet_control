@@ -1,0 +1,61 @@
+# adb-wan configuration: the only settings file.
+# Installed to /etc/adb-ethernet-control/config.toml by `sudo adb-wan install`.
+# Durations are whole seconds.
+
+[phone]
+# USB serial of the tethering phone (`adb devices -l`, the line with usb:).
+serial = "REPLACE_WITH_USB_SERIAL"
+# Function to enable when USB Ethernet is off: "rndis" or "ncm".
+usb_function = "rndis"
+
+[wan]
+# Host interface the phone's USB Ethernet appears as.
+interface = "REPLACE_WITH_INTERFACE"
+# Ping target for WAN health; the ping is bound to the interface above.
+probe_host = "8.8.8.8"
+probe_timeout_secs = 5
+
+[adb]
+binary = "/usr/local/bin/adb"
+# Our own ADB server; separate from a desktop server on 5037.
+server_port = 5038
+command_timeout_secs = 10
+server_start_timeout_secs = 15
+# libusb backend: the native backend did not find this phone.
+libusb = true
+# HOME of the ADB server: holds the key the phone has authorized.
+home = "/var/lib/adb-wan"
+
+[readiness]
+# Services that must be active before WAN is judged (add your LAN DHCP/DNS).
+units = ["NetworkManager.service"]
+timeout_secs = 120
+
+[timing]
+# How often a waited-for condition is re-checked.
+poll_interval_secs = 2
+# After readiness: how long WAN may take to come up on its own.
+initial_wan_timeout_secs = 90
+# How long to wait for the phone to appear authorized on USB.
+phone_timeout_secs = 60
+# How long to wait for a valid or changed USB state.
+usb_state_timeout_secs = 30
+# After a recovery action: how long WAN may take to work.
+wan_timeout_secs = 60
+# Final stability check: WAN must pass again after this interval.
+confirm_interval_secs = 10
+
+[recovery]
+# One USB off/on cycle when USB Ethernet is on but WAN is down.
+# Keep false until `adb-wan test-usb-toggle` has passed on this phone.
+usb_cycle_enabled = false
+# Function set used for "off"; must keep ADB alive (mtp did on HONOR).
+off_function = "mtp"
+
+[paths]
+ip = "/usr/sbin/ip"
+ping = "/usr/bin/ping"
+systemctl = "/usr/bin/systemctl"
+nmcli = "/usr/bin/nmcli"
+log_dir = "/var/log/adb-wan"
+runtime_dir = "/run/adb-wan"

@@ -11,6 +11,10 @@ name = "adb-wan"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
 
 [dev-dependencies]
 
@@ -26,6 +30,10 @@ panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
 print_stdout = "warn"
+# The library exists only to serve the binary and its tests; these two pedantic
+# lints target published library APIs and only add noise here.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
 
 [profile.release]
 lto = true

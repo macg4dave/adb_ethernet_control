@@ -1,0 +1,46 @@
+# Generated from src/units/service.rs; installed by `adb-wan install`.
+[Unit]
+Description=Recover the phone USB Ethernet WAN once after startup
+Wants=network-online.target NetworkManager.service
+After=network-online.target NetworkManager.service
+
+[Service]
+Type=oneshot
+# Once per boot. No Restart=: at most one recovery action.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/adb-wan --config /etc/adb-ethernet-control/config.toml boot
+User=adb-wan
+Group=adb-wan
+# ADB keeps its authorized key in HOME; this is not a program setting.
+Environment=HOME=/var/lib/adb-wan
+StateDirectory=adb-wan
+StateDirectoryMode=0700
+LogsDirectory=adb-wan
+LogsDirectoryMode=0750
+# Markers: once-per-boot guard and restore-pending. Kept until reboot.
+RuntimeDirectory=adb-wan
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+# Independent restore: runs even if the main process crashes or times out.
+ExecStopPost=/usr/local/bin/adb-wan --config /etc/adb-ethernet-control/config.toml restore
+TimeoutStartSec=15min
+TimeoutStopSec=5min
+# Only for the ping bound to the phone interface.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+UMask=0077
+PrivateTmp=yes
+# No PrivateDevices/PrivateNetwork: they would hide the USB phone and the WAN interface.
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SyslogIdentifier=adb-wan
+
+[Install]
+WantedBy=multi-user.target

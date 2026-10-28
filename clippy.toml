@@ -1,2 +1,6 @@
 # Proper names used in docs that are not code identifiers.
 doc-valid-idents = ["NetworkManager", ".."]
+# The rules allow unwrap/expect/panic in tests only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

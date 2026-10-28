@@ -43,8 +43,9 @@ Single binary `adb-wan` with subcommands. Layering, top to bottom:
 1. `main.rs`: parse CLI, call one command, map the error to an exit code.
    No logic.
 2. `commands/`: one file per subcommand; orchestrates a flow.
-3. Domain modules (`adb/`, `net/`, `units/`, `recovery/`, `record.rs`,
-   `config.rs`): capabilities and pure logic.
+3. Domain modules (`adb/`, `net/`, `units/`, `recovery/`, `host.rs`,
+   `record.rs`, `config.rs`, `account.rs`, `wait.rs`, `log.rs`): capabilities
+   and pure logic. `context.rs` bundles the injected dependencies (`Ctx`).
 4. `process.rs`: the **only** place that spawns external programs.
 
 Rules:
