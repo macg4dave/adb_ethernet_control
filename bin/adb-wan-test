@@ -6,8 +6,8 @@ if [[ ${TEST_SHARED_LOGS:-0} == 1 ]]; then umask 027; fi
 
 mode=${1:-}
 case "$mode" in
-    --check|--test-cycle|--host-cycle) (($# == 1)) || exit 1 ;;
-    *) printf 'Usage: adb-wan-test --check|--test-cycle|--host-cycle\n' >&2; exit 1 ;;
+    --check|--test-cycle|--test-usb-toggle|--host-cycle|--boot) (($# == 1)) || exit 1 ;;
+    *) printf 'Usage: adb-wan-test --check|--test-cycle|--test-usb-toggle|--host-cycle|--boot\n' >&2; exit 1 ;;
 esac
 
 recovery_bin=${RECOVERY_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-recover}
@@ -51,8 +51,10 @@ probe() {
 }
 snapshot() {
     printf '\nSnapshot: %s\n' "$(date -u +%FT%TZ)"
-    probe 'ADB transports' "${ADB_BIN:-adb}" -P "${ADB_SERVER_PORT:-5037}" devices -l
-    if [[ -n ${PHONE_SERIAL:-} ]]; then
+    if [[ "$mode" != --boot ]]; then
+        probe 'ADB transports' "${ADB_BIN:-adb}" -P "${ADB_SERVER_PORT:-5037}" devices -l
+    fi
+    if [[ "$mode" != --boot && "$mode" != --test-usb-toggle && -n ${PHONE_SERIAL:-} ]]; then
         probe 'Phone USB state' "${ADB_BIN:-adb}" -P "${ADB_SERVER_PORT:-5037}" -s "$PHONE_SERIAL" shell -T -n getprop sys.usb.state
     fi
     if [[ -n ${WAN_INTERFACE:-} ]]; then
@@ -68,7 +70,10 @@ snapshot
 stage=recovery
 write_result running pending
 code=0
-if [[ "$mode" == --host-cycle ]]; then
+if [[ "$mode" == --boot || "$mode" == --test-usb-toggle ]]; then
+    boot_bin=${BOOT_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-boot}
+    timeout --kill-after=15s "${test_timeout}s" "$boot_bin" "$mode" || code=$?
+elif [[ "$mode" == --host-cycle ]]; then
     host_cycle_bin=${HOST_CYCLE_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-host-cycle}
     timeout --kill-after=15s "${test_timeout}s" "$host_cycle_bin" || code=$?
 else

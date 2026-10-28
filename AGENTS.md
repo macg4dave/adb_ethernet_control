@@ -20,6 +20,10 @@ WAN of a Red Hat Enterprise Linux host, using ADB.
   the configured phone WAN NetworkManager profile. Arm an independent local
   restore timer before deactivation. Never change phone USB functions or LAN
   profiles in this test.
+- Boot installation is authorized. `adb-wan-boot` may reconnect the pinned
+  NetworkManager WAN profile once after readiness checks and failed WAN probes.
+  Healthy WAN is untouched; it needs neither ADB nor phone USB access. Keep
+  the independent local restore timer and persistent boot records.
 - Always select a specific USB transport before issuing phone commands. Handle
   absent, unauthorized, offline, and multiple devices explicitly.
 - Bound external calls with timeouts. Treat phone output as data; never eval it.

@@ -17,10 +17,11 @@ complexity warrants it. No Rust runtime or build is required today.
 4. If WAN is healthy, finish without changing anything.
 5. If WAN remains unhealthy, find the configured, authorized USB phone and
    read its actual USB functions.
-6. Only when USB networking and ADB are both enabled, cycle the existing RNDIS
-   or NCM function off and back on once.
-7. Allow USB re-enumeration, NetworkManager reconnection, and DHCP renewal;
-   check the WAN again and record success or failure in the journal.
+6. If USB Ethernet is off, enable the configured RNDIS/NCM function once. If
+   it is on but WAN is down, cycle off/on once with a one-second pause, only
+   after independent restoration has been verified and cycling enabled.
+7. Check WAN, wait ten seconds, and check again. On final failure, log one
+   error with the USB state and stop without further cycles.
 
 The boot service does not repeatedly reset a phone during a carrier outage.
 It does not change the LAN bridges, firewall, DHCP configuration, or routing
@@ -55,8 +56,18 @@ This does not establish whether the command blocked or the worker was killed,
 but shows that detached shell execution alone did not solve restoration.
 
 USB cycling is now disabled by default (`USB_CYCLE_ENABLED=0`). Normal checks
-and healthy-WAN no-op behavior remain available. Boot recovery must not be
-enabled until a control mechanism that survives USB changes is verified.
+and healthy-WAN no-op behavior remain available. The USB-based experimental
+recovery must not be enabled until its restoration mechanism is verified.
+The earlier boot service used conditional host-side NetworkManager
+reconnection. Following the reboot failure below, the boot code now selects
+the phone's USB state and supports enable-only recovery. A guarded off/on
+branch arms an independent systemd restore timer, pauses one second between
+off/on, and checks WAN twice ten seconds apart. Its hardware behavior remains
+unverified, so cycling remains disabled by default. See the boot guide.
+An explicit manual `--test-usb-toggle` flag now exercises one supervised USB
+off/on cycle independently of that automatic switch. It requires a healthy
+WAN baseline and observed USB off/on states; final WAN results are recorded
+separately and do not determine that test's pass/fail.
 
 A separate manually launched host-side test now exercises NetworkManager
 profile down/up while preserving the phone's USB mode. Its independent systemd
@@ -68,6 +79,16 @@ six seconds later. After the 20-second settling interval, WAN probes passed.
 The complete run took 42 seconds with exit code 0. The independent fallback
 timer was armed before the outage and canceled after successful activation;
 the fallback itself did not need to fire. No phone USB functions changed.
+
+The attended reboot test on 28 October 2026 failed to restore WAN automatically.
+The phone was present on USB at startup, but no RNDIS network interface was
+exposed. The user manually enabled tethering while the boot service was still
+waiting for initial connectivity; the interface then appeared and WAN probes
+passed. The service performed no reconnection or USB changes. Its `passed`
+record therefore describes connectivity after manual intervention, not a
+successful automatic recovery. The evidence does not establish why tethering
+was disabled across the reboot. Host-side NetworkManager reconnection cannot
+restore a network interface that the phone does not expose.
 
 Automatic WAN recovery and unattended cold-boot behavior have **not** been verified.
 Changing USB functions is not the same API as changing the Settings tethering

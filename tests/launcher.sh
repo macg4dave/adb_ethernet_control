@@ -9,6 +9,7 @@ export PATH="$scratch/bin:$PATH" PHONE_SERIAL=TEST_PHONE WAN_INTERFACE=testwan0
 export ADB_BIN=/usr/local/bin/adb
 cat > "$scratch/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
+if [[ "$1" == list-units ]]; then printf '%s' "${MOCK_RESTORE_UNITS:-}"; exit 0; fi
 printf '%s\n' "${MOCK_UNIT_STATE:-inactive}"
 MOCK
 cat > "$scratch/bin/restorecon" <<'MOCK'
@@ -30,7 +31,7 @@ case "$1" in
             mkdir -p "$MOCK_ROOT$snapshot"
         else
             # Do not touch the host: stage the two source files under MOCK_ROOT.
-            cp -- "${@:7:3}" "$MOCK_ROOT$snapshot/"
+            cp -- "${@:7:4}" "$MOCK_ROOT$snapshot/"
         fi
         ;;
     restorecon)
@@ -43,6 +44,13 @@ case "$1" in
             --host-cycle)
                 [[ " $* " == *' --property=User=root '* && " $* " == *' --setenv=TEST_SHARED_LOGS=1 '* ]]
                 [[ " $* " == *' --setenv=WAN_CONNECTION_UUID=11111111-2222-3333-4444-555555555555 '* ]]
+                ;;
+            --test-usb-toggle)
+                [[ " $* " == *' --property=User=root '* && " $* " == *' --setenv=TEST_SHARED_LOGS=1 '* ]]
+                [[ " $* " == *' --unit=adb-wan-usb-test '* && " $* " == *' --setenv=TEST_SYSTEMD_UNIT=adb-wan-usb-test '* ]]
+                [[ " $* " == *' --setenv=ADB_SERVER_UNIT= '* ]]
+                [[ " $* " == *' --setenv=LOCK_FILE=/var/log/adb-wan-usb-test/check.lock '* ]]
+                [[ -f "$MOCK_ROOT$snapshot/adb-wan-boot" ]]
                 ;;
             *) exit 99 ;;
         esac
@@ -59,8 +67,13 @@ cmp bin/adb-wan-test "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-test"
 cmp bin/adb-wan-recover "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-recover"
 cmp bin/adb-wan-host-cycle "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-host-cycle"
 ./scripts/start-local-check --host-cycle > "$scratch/output"
+./scripts/start-local-check --test-usb-toggle > "$scratch/output"
+cmp bin/adb-wan-boot "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-boot"
 : > "$MOCK_LOG"
 code=0
 MOCK_UNIT_STATE=activating ./scripts/start-local-check > "$scratch/output" 2>&1 || code=$?
+[[ "$code" == 1 && ! -s "$MOCK_LOG" ]]
+code=0
+MOCK_RESTORE_UNITS=adb-wan-usb-restore-123.timer ./scripts/start-local-check --test-usb-toggle > "$scratch/output" 2>&1 || code=$?
 [[ "$code" == 1 && ! -s "$MOCK_LOG" ]]
 printf 'Launcher regression tests passed.\n'

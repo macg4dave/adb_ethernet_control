@@ -71,10 +71,14 @@ For a permanent test unit:
 First prepare the host-local configuration, USB group/rule, and dedicated ADB
 server from [boot recovery](boot-recovery.md). Those instructions require sudo
 in a local terminal. Set `USB_CYCLE_ENABLED=0`; it stays disabled after both
-failed HONOR tests. Then install the runner and service from the repository:
+failed HONOR tests. This optional legacy test unit also needs
+`/etc/adb-ethernet-control/wan-recovery.env` prepared from
+`config/wan-recovery.env.example`, with the same phone and ADB port as
+`boot.env`. Then install the diagnostic CLI, runner, and service:
 
 ```bash
 sudo install -Dm755 bin/adb-wan-test /usr/local/bin/adb-wan-test
+sudo install -Dm755 bin/adb-wan-recover /usr/local/bin/adb-wan-recover
 sudo install -Dm644 systemd/system/adb-wan-test@.service /etc/systemd/system/adb-wan-test@.service
 sudo systemctl daemon-reload
 sudo systemctl start --no-block adb-wan-test@check.service
@@ -155,7 +159,48 @@ then canceled after normal restoration; its actual firing path has not yet
 been tested on hardware. The saved run is `run-y47RbfLh` in the host-test log
 directory (host-local evidence, not a repository artifact).
 
-### Phone-side outage remains unresolved
+### Explicit USB toggle test
+
+The requested manual override is `--test-usb-toggle`:
+
+```bash
+WAN_INTERFACE=enp48s0f4u2 ./scripts/start-local-check --test-usb-toggle
+```
+
+Run this in a local terminal where sudo can authenticate. The launcher selects
+the unique USB phone, or uses `PHONE_SERIAL` if supplied, and reuses the current
+ADB server (`ADB_SERVER_PORT=5037` by default). It installs the snapshot and
+starts `adb-wan-usb-test.service` under the system manager. It does not install
+or enable boot recovery. Direct helper invocation outside that system service
+is rejected.
+
+This explicitly requested manual mode bypasses the automatic cycle switch for
+one test; it does not enable automatic cycling. A healthy WAN baseline and
+USB Ethernet on are required before disruption. A separate enable-only systemd
+restore timer is armed first. Then the helper switches to MTP, waits one second,
+observes USB Ethernet off, and requests the original RNDIS/NCM function again.
+WAN is checked immediately and again after ten seconds. A pass requires both
+USB off and final USB on to have been observed. WAN results are informational:
+`passed` in this mode establishes USB function toggling, not WAN recovery or
+successful restoration of Android's Settings tethering switch.
+
+This is a hardware experiment: earlier live cycles required manual tethering
+restoration. The timer still depends on ADB returning, so remain able to restore
+tethering manually. Failure does not cause another off/on cycle. The launcher
+refuses to replace the snapshot while any test or USB restore is pending.
+
+Results and pre/post diagnostics are saved under
+`/var/log/adb-wan-usb-test/run-*/`. Read them with:
+
+```bash
+journalctl -u adb-wan-usb-test
+ls -lt /var/log/adb-wan-usb-test/
+cat /var/log/adb-wan-usb-test/run-XXXXXXXX/result
+cat /var/log/adb-wan-usb-test/run-XXXXXXXX/output.log
+journalctl -u 'adb-wan-usb-restore-*'
+```
+
+### Earlier phone-side outage tests
 
 Keeping a test running offline does not make an unreliable phone toggle safe.
 The last two live cycles required manual restoration. The detached phone
@@ -163,9 +208,9 @@ worker did not reach its restore result, and the exact reason is unresolved.
 The `test-cycle` instance is therefore blocked by `USB_CYCLE_ENABLED=0`.
 Do not enable it merely to test the supervisor.
 
-Before another disruptive test, establish a verified restoration mechanism
-that survives the USB change. The entire fallback must be scheduled locally
-before networking is touched. A host supervisor cannot send ADB commands
-through an interface that no longer exists. Keep a local person able to
-restore the phone until that fallback has been verified. There are no further
-automatic cycle retries and no reboot action in this test runner.
+Automatic cycling still requires verified independent restoration. The explicit
+manual flag above is available to investigate USB toggling without enabling
+automatic recovery. A host supervisor cannot send ADB commands through an
+interface that no longer exists. Keep a local person able to restore the phone
+until that fallback has been verified. There are no automatic cycle retries
+and no reboot action in this test runner.

@@ -40,6 +40,14 @@ record=${output#Local test records: }
 grep -Fxq 'mode=--host-cycle' "$record/result"
 grep -Fxq 'status=passed' "$record/result"
 [[ $(stat -c %a "$record") == 750 && $(stat -c %a "$record/result") == 640 ]]
+output=$(BOOT_BIN="$RECOVERY_BIN" MOCK_EXIT=0 ./bin/adb-wan-test --boot)
+record=${output#Local test records: }
+grep -Fxq 'mode=--boot' "$record/result"
+if grep -q 'ADB transports' "$record/output.log"; then exit 1; fi
+output=$(BOOT_BIN="$RECOVERY_BIN" MOCK_EXIT=0 ./bin/adb-wan-test --test-usb-toggle)
+record=${output#Local test records: }
+grep -Fxq 'mode=--test-usb-toggle' "$record/result"
+grep -Fq 'ADB transports' "$record/output.log"
 code=0
 output=$(TEST_TIMEOUT=1 MOCK_SLEEP=5 ./bin/adb-wan-test --check) || code=$?
 [[ "$code" == 124 ]]

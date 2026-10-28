@@ -3,7 +3,7 @@
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 mode=${1:---check}
-case "$mode" in --check|--host-cycle) ;; *) printf 'Usage: start-local-check [--check|--host-cycle]\n' >&2; exit 1 ;; esac
+case "$mode" in --check|--host-cycle|--test-usb-toggle) ;; *) printf 'Usage: start-local-check [--check|--host-cycle|--test-usb-toggle]\n' >&2; exit 1 ;; esac
 unit=adb-wan-local-check
 service_user=$(id -un)
 log_root=/var/log/adb-wan-test
@@ -15,6 +15,12 @@ if [[ "$mode" == --host-cycle ]]; then
     log_root=/var/log/adb-wan-host-test
     shared_logs=1
     uuid=$(nmcli -g GENERAL.CON-UUID device show "${WAN_INTERFACE:?Set WAN_INTERFACE}")
+fi
+if [[ "$mode" == --test-usb-toggle ]]; then
+    unit=adb-wan-usb-test
+    service_user=root
+    log_root=/var/log/adb-wan-usb-test
+    shared_logs=1
 fi
 : "${WAN_INTERFACE:?Set WAN_INTERFACE to the phone host interface}"
 adb_bin=${ADB_BIN:-$(command -v adb)}
@@ -29,7 +35,7 @@ for tool in timeout curl ip systemctl flock nmcli systemd-run; do
         exit 1
     fi
 done
-for other_unit in adb-wan-local-check adb-wan-host-test; do
+for other_unit in adb-wan-local-check adb-wan-host-test adb-wan-usb-test; do
 state=$(systemctl show "$other_unit.service" -p ActiveState --value)
 case "$state" in
     active|activating|deactivating)
@@ -38,14 +44,23 @@ case "$state" in
         ;;
 esac
 done
+restores=$(systemctl list-units --state=active,activating --plain --no-legend 'adb-wan-usb-restore-*.timer' 'adb-wan-usb-restore-*.service')
+if [[ -n "$restores" ]]; then
+    printf 'A USB restore is still pending; leaving its test snapshot untouched.\n' >&2
+    exit 1
+fi
 snapshot=/usr/local/bin/adb-wan-local-check
 printf 'Installing the test snapshot in %s with normal SELinux labels.\n' "$snapshot"
 sudo install -d -m755 -o root -g root "$snapshot"
-sudo install -m755 -o root -g root "$repo/bin/adb-wan-test" "$repo/bin/adb-wan-recover" "$repo/bin/adb-wan-host-cycle" "$snapshot/"
+sudo install -m755 -o root -g root "$repo/bin/adb-wan-test" "$repo/bin/adb-wan-recover" "$repo/bin/adb-wan-host-cycle" "$repo/bin/adb-wan-boot" "$snapshot/"
 if command -v restorecon >/dev/null; then
     sudo restorecon -RF "$snapshot"
 fi
-printf 'Launching %s under the system manager. No phone USB cycle or reboot.\n' "$mode"
+if [[ "$mode" == --test-usb-toggle ]]; then
+    printf 'Launching one manual USB Ethernet off/on test; WAN will be interrupted. Automatic recovery stays disabled.\n'
+else
+    printf 'Launching %s under the system manager. No phone USB cycle or reboot.\n' "$mode"
+fi
 sudo systemd-run --unit="$unit" --collect --no-block \
     --property=Type=oneshot --property="User=$service_user" --property="Group=$(id -gn)" \
     --property="LogsDirectory=${log_root##*/}" --property=LogsDirectoryMode=0750 \
@@ -56,7 +71,8 @@ sudo systemd-run --unit="$unit" --collect --no-block \
     --setenv="WAN_CONNECTION_UUID=$uuid" --setenv="TEST_SHARED_LOGS=$shared_logs" \
     --setenv="READY_UNITS=${READY_UNITS:-NetworkManager.service}" \
     --setenv="TEST_LOG_ROOT=$log_root" \
-    --setenv=LOCK_FILE=/var/log/adb-wan-test/check.lock \
+    --setenv="TEST_SYSTEMD_UNIT=$unit" --setenv=ADB_SERVER_UNIT= \
+    --setenv="LOCK_FILE=$log_root/check.lock" \
     --setenv=USB_CYCLE_ENABLED=0 \
     "$snapshot/adb-wan-test" "$mode"
 printf 'The local job continues without this terminal or chat.\n'

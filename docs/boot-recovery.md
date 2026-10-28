@@ -1,226 +1,126 @@
-# Boot WAN recovery
+# Boot USB Ethernet recovery
 
-**Current status: not ready for boot deployment.** Both live HONOR tests
-required the user to restore USB Ethernet manually. The detached worker's
-log stopped during the off command without an off-state or restore result.
-The command may have blocked or its process may have been terminated; the
-available logs do not distinguish these causes. Increasing the WAN settling
-delay does not fix this earlier control failure.
+After startup, the boot service checks WAN through the phone interface. A
+healthy WAN is untouched and requires no ADB access. When WAN is down, it
+selects the configured authorized USB phone and reads its actual USB state:
 
-`USB_CYCLE_ENABLED` defaults to `0`. Checks and healthy-WAN no-op runs still
-work; any run that would cycle USB exits before making changes. Setting it
-to `1` is an experimental opt-in, not a verified solution. The installation
-instructions below describe the proposed deployment, not a recommendation
-to enable it in its current state.
-See [offline testing](offline-testing.md) for host-supervised tests that keep
-running when this AI's WAN connection disappears.
+- USB Ethernet off: request the configured RNDIS or NCM function once.
+- USB Ethernet on but WAN down: perform one off/on cycle, with a **one-second
+  pause between off and on**, only if independent restoration has been verified
+  and cycling explicitly enabled.
+- Check WAN after the recovery decision, wait **10 seconds**, then check WAN
+  again. If the final check fails, log one error including whether USB Ethernet
+  is on, off, or unknown, and exit. Never repeat the cycle.
 
-## Recovery policy
+The initial WAN check follows readiness and startup settling. After recovery,
+the second WAN check determines the final outcome even if the first succeeded.
+Probe execution time is additional to the one-second and ten-second pauses.
+NetworkManager autoconnect remains responsible for DHCP and routing. Boot
+recovery does not deactivate host profiles or change LAN/firewall settings.
 
-`adb-wan-recover --check` waits for configured services and checks connectivity
-without changing USB functions. `--recover` can cycle USB networking once if
-checks still fail and the configured phone reports both ADB and RNDIS/NCM.
-All configuration comes from environment variables; scripts never evaluate
-phone output or execute commands from configuration strings.
+## Installation
 
-The system service starts after `network-online.target`. This target is an
-ordering milestone, not proof of internet access, and can be reached after
-wait-online fails. The script separately checks that every service in
-`READY_UNITS` is active. A service with `Type=simple` may be active before its
-application is fully ready; use the startup delay and the service's own
-readiness mechanism where available. Do not make a readiness dependency wait
-for this recovery service or for working WAN: that would create a dependency
-cycle. The host's LAN DHCP/DNS service is separate from the phone's DHCP server,
-which supplies the host's WAN address.
-
-WAN health requires a global IPv4 address on `WAN_INTERFACE` and an HTTP 200
-response from either configured HTTPS endpoint. Curl is bound to that
-interface, ignores proxies and user curl configuration, and uses numeric IP
-URLs by default to avoid a DNS dependency. Default probes contact Cloudflare
-at `1.1.1.1` and `1.0.0.1`; replace them with endpoints known to work on your
-carrier. A blocked endpoint, broken TLS/time setup, or a carrier outage can
-cause a failed health check. Two endpoints reduce dependence on one address
-but do not prove the fault is USB. Only one cycle is allowed per run.
-
-Default waits: services 120 seconds, startup settling 15 seconds, initial WAN
-45 seconds, ADB 60 seconds, USB-off delay 3 seconds, post-enable settling
-20 seconds, then restored WAN probes for 60 seconds. `POST_ENABLE_DELAY`
-allows for the observed 10–15 seconds between enabling USB Ethernet and
-usable WAN. The 60-second probe budget starts after this delay.
-Individual ADB calls are limited to 10 seconds and each HTTPS probe to 5
-seconds. A wait can overrun its budget by its in-flight probe and polling
-interval. The systemd job has a final 10-minute limit; increase it if you
-increase the script's waits. A lock prevents overlapping runs sharing its
-path. Direct CLI runs use the installed service's lock when its runtime
-directory exists and is writable, otherwise the user's runtime directory.
-
-The phone runs a detached `nohup setsid sh` worker containing both the off
-command (`svc usb setFunctions`) and the restore (`svc usb setFunctions rndis`
-or `ncm`), with `OFF_DELAY` between them. It records the off state and restore
-exit code in `/data/local/tmp/adb-wan-cycle.log`. Every run uses a new ID so a
-stale record cannot count as success. Only fixed commands and validated
-integer/enum values enter the worker. Combined modes containing extra USB
-functions are rejected rather than silently dropping those functions.
-
-Both commands must run on the phone: during the first live test, turning
-networking off also removed ADB. The earlier host-driven sequence could not
-send the restore and required manual tethering restoration. It failed before
-WAN probing, so simply increasing the WAN timeout would not fix it.
-
-The host checks for the required detached-execution tools before starting,
-then waits for the authorized USB phone and the current worker's completion
-record. The phone can attempt restoration even while the host has no ADB or
-WAN connection. A final bounded host-side restore is attempted on a control
-failure when possible. Power loss, phone-side errors, or termination of the
-worker can still require manual intervention. The revised approach failed its
-attended cycle test; another USB control mechanism is needed before deployment.
-
-Exit codes: `0` healthy or restored, `1` configuration/readiness/control failure,
-`2` WAN unhealthy in check mode or still unhealthy after recovery. The service
-does not restart recovery automatically; `RemainAfterExit=true` records a
-successful run until the next boot or explicit restart.
-
-## Prepare the host
-
-Requirements: Bash, ADB, coreutils, iproute, curl, util-linux (`flock`), systemd,
-and NetworkManager. Use the existing phone's authorized ADB key. Do not run the
-ADB server as root or create a new identity if you expect existing authorization
-to work. `User=dave` and `HOME=/home/dave` in the supplied system units match
-this host; change both if deploying elsewhere.
-
-The current `uaccess` rule grants USB access during an active local session.
-Unattended boot needs a static group grant. The supplied udev rule grants
-`adbwan` access only to HONOR USB devices exposing an ADB interface, including
-product IDs that may change during a cycle. Both system services receive that
-supplementary group; the login user does not need to be added to it.
-
-Review these files before installing:
-
-- `config/wan-recovery.env.example`
-- `systemd/system/adb-wan-server.service`
-- `systemd/system/adb-wan-recover.service`
-- `udev/70-adb-wan.rules`
-
-Run the following from the repository root to install files without enabling
-or running recovery:
-
-```bash
-sudo groupadd --force adbwan
-sudo install -Dm755 bin/adb-wan-recover /usr/local/bin/adb-wan-recover
-sudo install -d -m755 /etc/adb-ethernet-control
-sudo install -m640 -o root -g adbwan config/wan-recovery.env.example /etc/adb-ethernet-control/wan-recovery.env
-sudo install -Dm644 udev/70-adb-wan.rules /etc/udev/rules.d/70-adb-wan.rules
-sudo install -Dm644 systemd/system/adb-wan-server.service /etc/systemd/system/adb-wan-server.service
-sudo install -Dm644 systemd/system/adb-wan-recover.service /etc/systemd/system/adb-wan-recover.service
-sudoedit /etc/adb-ethernet-control/wan-recovery.env
-sudo systemctl daemon-reload
-sudo udevadm control --reload-rules
-```
-
-Set `PHONE_SERIAL` from `adb devices -l` and confirm `WAN_INTERFACE`. Configure
-`READY_UNITS` for the actual DHCP/DNS service; the example includes this host's
-`pc101-technitium.service`. Set an absolute `ADB_BIN` path. The file uses plain
-assignments with quoted space-separated values, no `export`. Keep device
-serials in this host-local file, outside Git.
-
-Apply the new udev rule to the phone by reconnecting it during a maintenance
-window, or using a targeted udev trigger against its USB device sysfs path.
-Verify the device node's group becomes `adbwan` and group read/write is allowed.
-USB bus/device numbers can change.
-
-The dedicated ADB server listens on localhost port 5038 with libusb and uses
-the existing user's key. Only one ADB server can claim the phone interface.
-Stop the old server with `adb kill-server` before starting the dedicated server:
-
-```bash
-adb kill-server
-sudo systemctl start adb-wan-server.service
-adb -P 5038 devices -l
-```
-
-For diagnostics once this server owns the phone, use `adb -P 5038 ...` or:
-
-```bash
-ADB_SERVER_SOCKET=tcp:localhost:5038 ./bin/adb-ethernet-control status
-```
-
-The recovery script passes `-P` explicitly. Do not enable a conflicting ADB
-server at boot. Ensure the phone remains authorized after a reconnect and the
-service user can access its existing key before testing recovery.
-
-For explicit ordering after the host's LAN service, install a drop-in:
-
-```ini
-# /etc/systemd/system/adb-wan-recover.service.d/lan.conf
-[Unit]
-Wants=pc101-technitium.service
-After=pc101-technitium.service
-```
-
-`READY_UNITS` still checks active status at runtime. The generic unit does not
-hardcode a third-party DHCP service. Inspect dependencies before adding a
-drop-in so startup cannot wait on itself.
-
-## Validate before enabling
-
-`--test-cycle` is an explicit manual hardware test: it requires a healthy WAN
-baseline, then performs one off/on cycle and checks connectivity afterward.
-It briefly interrupts the working WAN. Never use this mode in a boot unit.
-Use the same environment as `--check`, replacing that argument with
-`--test-cycle`, only when an actual USB interruption has been requested.
-The test also reads the USB state between off and restore. If networking was
-not observed off, it restores the original mode but reports the test as
-inconclusive even if the WAN is healthy afterward.
-
-First run a read-only check using environment variables for this host. With
-the original ADB server still running, use its port 5037; with the dedicated
-server use 5038:
+From a local terminal in the checkout, with the phone already authorized:
 
 ```bash
 PHONE_SERIAL=YOUR_USB_SERIAL WAN_INTERFACE=enp48s0f4u2 \
-  ADB_SERVER_PORT=5038 \
-  READY_UNITS="NetworkManager.service pc101-technitium.service" \
-  ./bin/adb-wan-recover --check
+  ./scripts/install-boot-service
 ```
 
-To read the installed environment as the service user without shell sourcing,
-use a temporary system unit. Its name must differ from the installed service:
+The installer requires sudo. It installs root-owned boot executables, a
+systemd-owned ADB server running as the invoking user, and headless USB access
+rules for this HONOR phone. Rules take effect on the next USB enumeration;
+the installer does not reset USB devices. The ADB server uses that user's
+existing keys, libusb, and port 5038. It is started only if WAN is unhealthy.
+A healthy immediate check does not validate ADB access. No phone identifiers
+or keys are written into Git.
+
+The installer writes `/etc/adb-ethernet-control/boot.env`, verifies the unit,
+runs the boot service, and enables it only after a successful run. It does
+not reboot. The default readiness list is
+`NetworkManager.service pc101-technitium.service`; override `READY_UNITS`
+on other hosts. Reinstalling replaces the generated configuration and resets
+`USB_CYCLE_ENABLED=0`.
+
+## Restoration limitation
+
+**Automatic cycling remains disabled by default.** Both earlier live USB
+cycles lost control and required manual tethering restoration. The attended
+reboot test also required manual tethering restoration: the phone was present
+on USB but exposed no network interface until the user enabled tethering.
+The old host-side NetworkManager reconnect could not fix that condition. Its
+passing record reflected the user's manual repair during the initial wait.
+
+The new enable-only branch can request USB networking when it is off. Whether
+`svc usb setFunctions` also starts this vendor's tethering/DHCP service still
+requires hardware validation; a successful command alone is insufficient.
+
+Before a cycle, the new coordinator arms a separate systemd restore timer.
+The off step requests MTP rather than the earlier charging-only mode; this is
+intended to retain debugging, but has **not been verified on this phone**.
+After one second, the coordinator waits for the pinned USB ADB transport and
+requests the original networking function. It never uses ADB root. The
+independent timer survives coordinator termination and runs the same script
+in enable-only `--restore rndis` or `--restore ncm` mode after 30 seconds.
+The timer is canceled after successful final WAN and USB-state checks. On
+failure it remains armed. This fallback cannot restore a phone that stops
+exposing ADB altogether. Keep `USB_CYCLE_ENABLED=0` until an independent
+restore path has been verified in an explicitly requested, attended hardware
+test. An unhealthy on-state with cycling disabled still receives the two WAN
+checks and one final error; it is not silently treated as repaired.
+
+The explicit manual `scripts/start-local-check --test-usb-toggle` flag can
+exercise one USB off/on cycle without enabling the automatic branch. It needs
+a healthy starting WAN, system-manager supervision, and a restore timer. Its
+pass/fail concerns observed USB states; WAN results are informational. See
+[manual testing](offline-testing.md#explicit-usb-toggle-test) for the command
+and hardware limitations.
+
+## Bounds and records
+
+Defaults wait up to 120 seconds for readiness services, settle for 15 seconds,
+and wait up to 60 seconds for the configured USB phone when recovery is needed.
+Absent, unauthorized, offline, non-USB, ambiguous, or unexpected USB states
+produce a control failure without a USB toggle. Other phones can coexist;
+commands use only the configured phone's current USB transport ID, reselected
+after enumeration. Unknown states are not assumed to mean Ethernet is off.
+
+WAN health requires a global IPv4 address and an HTTPS 200 response bound to
+`WAN_INTERFACE`. Probes ignore proxies and curl configuration. Defaults use
+`https://1.1.1.1/cdn-cgi/trace` and `https://1.0.0.1/cdn-cgi/trace`, avoiding DNS.
+Each endpoint has a five-second timeout. Carrier outages, blocked endpoints,
+or incorrect host time/TLS can still cause failures.
+
+External operations have timeouts. The local runner limits the boot command
+to 600 seconds and records diagnostics after failure. The system unit has a
+15-minute final limit. Restore workers have their own 100-second limit.
+No automatic service restart is configured.
+
+After reboot, inspect the local journal and persistent record:
 
 ```bash
-sudo systemd-run --unit=adb-wan-check --wait --pipe --collect \
-  --property=User=dave --property=SupplementaryGroups=adbwan \
-  --property=EnvironmentFile=/etc/adb-ethernet-control/wan-recovery.env \
-  --property=RuntimeDirectory=adb-wan-check \
-  --setenv=HOME=/home/dave --setenv=LOCK_FILE=/run/adb-wan-check/recovery.lock \
-  /usr/local/bin/adb-wan-recover --check
+systemctl status adb-wan-recover.service --no-pager
+journalctl -b -u adb-wan-recover.service
+ls -lt /var/log/adb-wan-boot/
+cat /var/log/adb-wan-boot/run-XXXXXXXX/result
+cat /var/log/adb-wan-boot/run-XXXXXXXX/output.log
+journalctl -b -u 'adb-wan-usb-restore-*'
 ```
 
-A healthy check proves probing works, but does not exercise the USB toggle.
-During a maintenance window, reproduce the reboot failure and start the
-recovery service manually. Keep local access to the phone to restore USB
-tethering if ADB is lost. Confirm the journal reports a cycle followed by
-restored WAN, and that LAN DHCP/DNS still serves clients:
+Replace the directory placeholder with the current run. Records are root-owned
+and readable by the installer's primary group. Result status is `running`,
+`passed`, or `failed`; a leftover `running` record is incomplete. Manual
+intervention during a run must be considered when interpreting success.
+Exit codes are 0 for healthy/restored, 1 for configuration/readiness/control
+failure, and 2 for WAN unavailable on the final check. The oneshot stays active
+after success and does not repeat automatically. Disable future runs with:
 
 ```bash
-sudo systemctl start adb-wan-recover.service
-journalctl -u adb-wan-server.service -u adb-wan-recover.service -b
+sudo systemctl disable adb-wan-recover.service
 ```
 
-After controlled recovery succeeds, enable boot recovery (without immediately
-starting another cycle):
-
-```bash
-sudo systemctl enable adb-wan-recover.service
-```
-
-The server is started as a dependency; it does not need a separate enable.
-Complete an attended reboot test before relying on unattended recovery. Verify
-USB permissions before login, ADB authorization, the service order, WAN probes,
-and that an already healthy boot performs zero USB changes. If a previous
-successful run remains active, an explicit `systemctl restart` starts a new run;
-there is no recurring recovery timer.
-
-Disable future boot recovery with `sudo systemctl disable adb-wan-recover.service`.
-Stopping a recovery in progress can interrupt its off/on sequence; let it
-finish where possible. The older user reporting timer only prints diagnostics
-and can be disabled independently.
+`./scripts/check` uses fake devices and never changes real networking. Hardware
+validation must separately cover enable-only recovery, continued ADB access
+during off/on, actual timer restoration with the coordinator stopped, DHCP,
+and an attended reboot. Live tests must run under the systemd system manager
+with local records; see [offline testing](offline-testing.md).

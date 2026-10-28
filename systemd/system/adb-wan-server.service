@@ -11,7 +11,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=ADB_BIN=/usr/local/bin/adb
 Environment=ADB_SERVER_PORT=5038
 Environment=ADB_LIBUSB=1
-EnvironmentFile=/etc/adb-ethernet-control/wan-recovery.env
+EnvironmentFile=/etc/adb-ethernet-control/boot.env
 ExecStart=/usr/bin/env ${ADB_BIN} -L tcp:localhost:${ADB_SERVER_PORT} server nodaemon
 Restart=on-failure
 RestartSec=5s
