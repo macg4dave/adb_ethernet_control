@@ -1,0 +1,11 @@
+[Unit]
+Description=Inspect Android USB Ethernet state
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/adb-ethernet-control status
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/adb-ethernet-control/environment
+TimeoutStartSec=4min
+UMask=0077
+NoNewPrivileges=true

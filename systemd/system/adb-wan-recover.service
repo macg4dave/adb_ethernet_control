@@ -1,0 +1,23 @@
+[Unit]
+Description=Recover phone USB WAN once after host startup
+Wants=network-online.target
+Requires=NetworkManager.service adb-wan-server.service
+After=network-online.target NetworkManager.service adb-wan-server.service
+
+[Service]
+Type=oneshot
+User=dave
+SupplementaryGroups=adbwan
+Environment=HOME=/home/dave
+EnvironmentFile=/etc/adb-ethernet-control/wan-recovery.env
+RuntimeDirectory=adb-wan-recover
+RuntimeDirectoryMode=0700
+Environment=LOCK_FILE=/run/adb-wan-recover/recovery.lock
+ExecStart=/usr/local/bin/adb-wan-recover --recover
+TimeoutStartSec=10min
+RemainAfterExit=true
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

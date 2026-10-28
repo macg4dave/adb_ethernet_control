@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Inspect Android USB networking without changing phone or host configuration.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: adb-ethernet-control [--serial SERIAL] [devices|status]
+
+  devices  List ADB transports, including authorization state.
+  status   Inspect one USB-connected phone and host networking (default).
+
+Options:
+  --serial SERIAL  Select a USB phone; otherwise exactly one must be authorized.
+  -h, --help       Show this help.
+
+Environment: ADB_BIN (adb executable), ADB_TIMEOUT (seconds, default 15).
+EOF
+}
+
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+serial=''
+action=status
+action_seen=false
+while (($#)); do
+    case "$1" in
+        --serial)
+            if (($# < 2)); then die '--serial requires a serial number'; fi
+            [[ -n "$2" && "$2" != -* ]] || die '--serial requires a serial number'
+            serial=$2
+            shift 2
+            ;;
+        devices|status)
+            "$action_seen" && die 'specify only one command'
+            action=$1
+            action_seen=true
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1 (see --help)" ;;
+    esac
+done
+
+adb_bin=${ADB_BIN:-adb}
+adb_timeout=${ADB_TIMEOUT:-15}
+[[ "$adb_timeout" =~ ^[1-9][0-9]*$ ]] || die 'ADB_TIMEOUT must be a positive integer'
+command -v "$adb_bin" >/dev/null || die "ADB executable not found: $adb_bin"
+command -v timeout >/dev/null || die 'GNU timeout is required (coreutils)'
+
+adb_run() { timeout --kill-after=2s "${adb_timeout}s" "$adb_bin" "$@"; }
+listing=$(adb_run devices -l) || die 'cannot list ADB devices; check the ADB server and USB access'
+if [[ "$action" == devices ]]; then
+    printf '%s\n' "$listing"
+    exit 0
+fi
+
+declare -a candidates=()
+selected_state=''
+selected_usb=false
+while read -r id state details; do
+    [[ -n "$id" && "$id" != List && "$id" != \** ]] || continue
+    if [[ " $details " == *' usb:'* && "$state" == device ]]; then
+        candidates+=("$id")
+    fi
+    if [[ -n "$serial" && "$id" == "$serial" ]]; then
+        selected_state=$state
+        if [[ " $details " == *' usb:'* ]]; then selected_usb=true; fi
+    fi
+done <<< "$listing"
+
+if [[ -n "$serial" ]]; then
+    [[ -n "$selected_state" ]] || die "device $serial is not connected"
+    [[ "$selected_state" == device ]] || die "device $serial is $selected_state; unlock the phone and authorize USB debugging"
+    "$selected_usb" || die "device $serial is not a USB transport"
+else
+    ((${#candidates[@]} > 0)) || die 'no authorized USB phone found; run devices, unlock the phone, and accept USB debugging'
+    ((${#candidates[@]} == 1)) || die 'multiple USB phones found; select one with --serial SERIAL'
+    serial=${candidates[0]}
+fi
+
+printf 'ADB USB device: %s\n' "$serial"
+partial=false
+phone_section() {
+    local title=$1
+    shift
+    printf '\n== %s ==\n' "$title"
+    if ! adb_run -s "$serial" shell -T -n "$@"; then
+        printf 'Unavailable: command failed, timed out, or access was denied.\n' >&2
+        partial=true
+    fi
+}
+
+phone_section 'Phone model' getprop ro.product.model
+phone_section 'Android version' getprop ro.build.version.release
+phone_section 'Requested USB functions' getprop sys.usb.config
+phone_section 'Active USB functions' getprop sys.usb.state
+phone_section 'USB service' dumpsys usb
+phone_section 'Phone network addresses' ip address show
+phone_section 'Phone IPv4 routes' ip -4 route show
+phone_section 'Phone IPv6 routes' ip -6 route show
+phone_section 'Tethering service' dumpsys tethering
+
+printf '\n== Host network addresses ==\n'
+if command -v ip >/dev/null; then
+    ip -brief address || partial=true
+else
+    printf 'Unavailable: install iproute.\n'
+    partial=true
+fi
+printf '\n== Host NetworkManager devices ==\n'
+if command -v nmcli >/dev/null; then
+    timeout --kill-after=2s "${adb_timeout}s" nmcli device status || partial=true
+else
+    printf 'Unavailable: nmcli is not installed (optional).\n'
+fi
+
+if "$partial"; then
+    printf '\nReport incomplete: one or more probes failed.\n' >&2
+    exit 2
+fi

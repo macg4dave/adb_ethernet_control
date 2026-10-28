@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Bounded boot-time recovery of a USB phone WAN. Configuration is environment-only.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: adb-wan-recover --check|--recover
+
+--check    Wait for startup and check WAN; never change USB functions.
+--recover  If WAN remains down and USB networking is enabled, cycle it once.
+
+Required environment: PHONE_SERIAL, WAN_INTERFACE.
+See docs/boot-recovery.md and config/wan-recovery.env.example.
+Exit: 0 healthy, 1 configuration/control failure, 2 WAN unhealthy or not restored.
+EOF
+}
+log() { printf 'adb-wan-recover: %s\n' "$*"; }
+die() { log "$*" >&2; exit 1; }
+mode=${1:-}
+case "$mode" in
+    -h|--help) usage; exit 0 ;;
+    --check|--recover) (($# == 1)) || die 'specify one mode' ;;
+    *) usage >&2; exit 1 ;;
+esac
+
+: "${PHONE_SERIAL:?Set PHONE_SERIAL to the authorized USB phone serial}"
+: "${WAN_INTERFACE:?Set WAN_INTERFACE to the phone host network interface}"
+[[ "$PHONE_SERIAL" =~ ^[a-zA-Z0-9._:-]+$ ]] || die 'invalid PHONE_SERIAL'
+[[ "$WAN_INTERFACE" =~ ^[a-zA-Z0-9._:-]+$ ]] || die 'invalid WAN_INTERFACE'
+ADB_BIN=${ADB_BIN:-adb}
+ADB_SERVER_PORT=${ADB_SERVER_PORT:-5037}
+ADB_TIMEOUT=${ADB_TIMEOUT:-10}
+READY_UNITS=${READY_UNITS:-NetworkManager.service}
+READINESS_TIMEOUT=${READINESS_TIMEOUT:-120}
+PHONE_TIMEOUT=${PHONE_TIMEOUT:-60}
+STARTUP_DELAY=${STARTUP_DELAY:-15}
+HEALTH_GRACE=${HEALTH_GRACE:-45}
+RECOVERY_TIMEOUT=${RECOVERY_TIMEOUT:-60}
+POLL_INTERVAL=${POLL_INTERVAL:-3}
+OFF_DELAY=${OFF_DELAY:-3}
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-5}
+PROBE_URLS=${PROBE_URLS:-https://1.1.1.1/cdn-cgi/trace https://1.0.0.1/cdn-cgi/trace}
+if [[ -w /run/adb-wan-recover ]]; then
+    LOCK_FILE=${LOCK_FILE:-/run/adb-wan-recover/recovery.lock}
+else
+    LOCK_FILE=${LOCK_FILE:-${XDG_RUNTIME_DIR:-/run/user/$UID}/adb-wan-recover.lock}
+fi
+for name in ADB_SERVER_PORT ADB_TIMEOUT READINESS_TIMEOUT PHONE_TIMEOUT STARTUP_DELAY HEALTH_GRACE RECOVERY_TIMEOUT POLL_INTERVAL OFF_DELAY PROBE_TIMEOUT; do
+    [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer"
+done
+((ADB_SERVER_PORT <= 65535)) || die 'invalid ADB_SERVER_PORT'
+for tool in "$ADB_BIN" timeout curl ip systemctl flock; do
+    command -v "$tool" >/dev/null || die "missing executable: $tool"
+done
+read -r -a ready_units <<< "$READY_UNITS"
+read -r -a probe_urls <<< "$PROBE_URLS"
+((${#ready_units[@]} > 0)) || die 'READY_UNITS must list at least one service'
+((${#probe_urls[@]} > 0)) || die 'PROBE_URLS must list at least one endpoint'
+for unit in "${ready_units[@]}"; do
+    [[ "$unit" =~ ^[a-zA-Z0-9_.@:-]+\.service$ ]] || die "invalid readiness unit: $unit"
+done
+for url in "${probe_urls[@]}"; do
+    [[ "$url" == https://* ]] || die 'WAN probes must use HTTPS'
+done
+exec 9> "$LOCK_FILE"
+flock -n 9 || die 'another recovery/check process is running'
+
+adb_run() { timeout --kill-after=2s "${ADB_TIMEOUT}s" "$ADB_BIN" -P "$ADB_SERVER_PORT" "$@"; }
+phone() { adb_run -s "$PHONE_SERIAL" shell -T -n "$@"; }
+# Called indirectly by wait_until.
+# shellcheck disable=SC2317
+ready() {
+    local unit
+    for unit in "${ready_units[@]}"; do
+        timeout --kill-after=2s 5s systemctl is-active --quiet "$unit" || return 1
+    done
+    return 0
+}
+# shellcheck disable=SC2317
+authorized_usb() {
+    local listing id state details
+    listing=$(adb_run devices -l) || return 1
+    while read -r id state details; do
+        if [[ "$id" == "$PHONE_SERIAL" && "$state" == device && " $details " == *' usb:'* ]]; then
+            return 0
+        fi
+    done <<< "$listing"
+    return 1
+}
+healthy() {
+    local url code
+    # Binding probes prevents another WAN or a proxy from hiding phone failure.
+    ip -4 -o address show dev "$WAN_INTERFACE" scope global 2>/dev/null | grep -q ' inet ' || return 1
+    for url in "${probe_urls[@]}"; do
+        code=$(curl --disable --ipv4 --noproxy '*' --interface "$WAN_INTERFACE" \
+            --silent --output /dev/null --write-out '%{http_code}' \
+            --connect-timeout "$PROBE_TIMEOUT" --max-time "$PROBE_TIMEOUT" "$url") || continue
+        [[ "$code" == 200 ]] && return 0
+    done
+    return 1
+}
+wait_until() {
+    local label=$1 budget=$2 deadline
+    shift 2
+    deadline=$((SECONDS + budget))
+    log "Waiting for $label (up to ${budget}s plus in-flight probe time)."
+    while true; do
+        if "$@"; then return 0; fi
+        ((SECONDS < deadline)) || return 1
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+wait_until 'host services' "$READINESS_TIMEOUT" ready || die "required services not active: $READY_UNITS"
+log "Startup settling delay: ${STARTUP_DELAY}s."
+sleep "$STARTUP_DELAY"
+if wait_until 'phone WAN connectivity' "$HEALTH_GRACE" healthy; then
+    log 'WAN healthy; no changes needed.'
+    exit 0
+fi
+if [[ "$mode" == --check ]]; then
+    log 'WAN unhealthy; check mode made no changes.'
+    exit 2
+fi
+wait_until 'authorized USB phone' "$PHONE_TIMEOUT" authorized_usb || die 'phone absent, unauthorized, offline, or not USB; no toggle performed'
+state=$(phone getprop sys.usb.state) || die 'cannot read phone USB state; no toggle performed'
+state=${state//$'\r'/}
+case ",$state," in
+    *,rndis,*) function=rndis ;;
+    *,ncm,*) function=ncm ;;
+    *) die "USB networking not enabled (state=$state); no toggle performed" ;;
+esac
+[[ ",$state," == *,adb,* ]] || die 'USB state does not include ADB; refusing to risk losing control'
+[[ "$state" == "$function,adb" || "$state" == "adb,$function" ]] || die "unsupported combined USB state ($state); no toggle performed"
+# Check again immediately before disruption: networking may have recovered.
+if healthy; then log 'WAN recovered before toggle; no changes needed.'; exit 0; fi
+
+restore_pending=true
+# Called by the EXIT trap.
+# shellcheck disable=SC2317
+cleanup() {
+    if "$restore_pending"; then
+        log "Attempting final best-effort restore of $function."
+        phone svc usb setFunctions "$function" || log 'Restore failed; manual phone intervention may be required.'
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+log "WAN unhealthy with $function enabled; performing one USB networking cycle."
+# Android's USB service normally retains ADB while debugging is enabled.
+# A USB re-enumeration can drop this command's ADB response, so always restore.
+phone svc usb setFunctions || log 'Off command failed or USB disconnected; continuing to restore.'
+sleep "$OFF_DELAY"
+wait_until 'ADB after USB re-enumeration' "$PHONE_TIMEOUT" authorized_usb || die 'ADB did not return; cannot restore automatically'
+phone svc usb setFunctions "$function" || die 'USB networking restore command failed'
+restore_pending=false
+if wait_until 'restored WAN connectivity' "$RECOVERY_TIMEOUT" healthy; then
+    log 'WAN restored after one USB networking cycle.'
+    exit 0
+fi
+log 'WAN still unhealthy after one cycle; stopping without further toggles.'
+exit 2

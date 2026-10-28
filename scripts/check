@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+sources=(bin/adb-ethernet-control bin/adb-wan-recover scripts/check tests/cli.sh tests/recovery.sh)
+for source in "${sources[@]}"; do bash -n "$source"; done
+if command -v shellcheck >/dev/null; then
+    shellcheck "${sources[@]}"
+else
+    printf 'shellcheck is required for development checks.\n' >&2
+    exit 1
+fi
+bash tests/cli.sh
+bash tests/recovery.sh
+# Verify against the checkout executable before anything has been installed.
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT
+binary="$PWD/bin/adb-ethernet-control"
+binary=${binary//\\/\\\\}
+binary=${binary//\"/\\\"}
+binary=${binary//%/%%}
+service=$(<systemd/user/adb-ethernet-control.service)
+service=${service//%h\/.local\/bin\/adb-ethernet-control/\"$binary\"}
+printf '%s\n' "$service" > "$scratch/adb-ethernet-control.service"
+cp systemd/user/adb-ethernet-control.timer "$scratch/"
+systemd-analyze --user verify "$scratch/adb-ethernet-control.service" "$scratch/adb-ethernet-control.timer"
+recovery=$(<systemd/system/adb-wan-recover.service)
+binary="$PWD/bin/adb-wan-recover"
+binary=${binary//\\/\\\\}
+binary=${binary//\"/\\\"}
+binary=${binary//%/%%}
+recovery=${recovery//\/usr\/local\/bin\/adb-wan-recover/\"$binary\"}
+printf '%s\n' "$recovery" > "$scratch/adb-wan-recover.service"
+cp systemd/system/adb-wan-server.service "$scratch/"
+# Resolve distribution dependencies without pulling in unrelated host overrides.
+# RHEL installs the D-Bus implementation alias under /etc rather than /usr.
+if [[ -e /etc/systemd/system/dbus.service ]]; then
+    ln -s "$(readlink -f /etc/systemd/system/dbus.service)" "$scratch/dbus.service"
+fi
+SYSTEMD_UNIT_PATH="$scratch:/usr/lib/systemd/system" systemd-analyze verify "$scratch/adb-wan-recover.service" "$scratch/adb-wan-server.service"
