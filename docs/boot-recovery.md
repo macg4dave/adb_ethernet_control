@@ -41,7 +41,9 @@ path, and readiness services. Each answer is prefilled: edit it using the arrow
 keys and Backspace, or press Enter to accept. Each question includes a tip for
 finding the information manually. It shows the settings before installation. Run it
 as your normal user; it requests sudo when needed. Use `./install.sh --dry-run`
-to preview or `./install.sh --help` for unattended usage.
+to preview or `./install.sh --help` for unattended usage. The summary includes a
+read-only reading of the phone's `sys.usb.state` and how boot recovery judges it
+(on, off with one enable request, or not recognized).
 
 Environment settings take priority, followed by readable values from
 `/etc/adb-ethernet-control/boot.env`, followed by read-only detection. ADB is

@@ -29,9 +29,15 @@ exec "$@"
 MOCK
 cat > "$scratch/bin/adb" <<'MOCK'
 #!/usr/bin/env bash
+if [[ "$*" == '-H 127.0.0.1 -P 5038 -t 8 shell -T -n getprop sys.usb.state' ]]; then
+    [[ -n ${MOCK_USB_STATE:-} ]] || exit 1
+    printf '%s\r\n' "$MOCK_USB_STATE"
+    exit 0
+fi
 [[ "$*" == '-H 127.0.0.1 -P 5038 devices -l' || "$*" == '-H 127.0.0.1 -P 5037 devices -l' ]] || exit 99
 case "${MOCK_DISCOVERY:-none}" in
     one) echo 'AUTO_PHONE device usb:1-2 transport_id:8' ;;
+    pinned) echo 'TEST_PHONE device usb:1-2 transport_id:8' ;;
     multiple) printf 'AUTO_PHONE device usb:1-2 transport_id:8\nOTHER_PHONE device usb:1-3 transport_id:9\n' ;;
     unauthorized) echo 'AUTO_PHONE unauthorized usb:1-2 transport_id:8' ;;
     offline) echo 'AUTO_PHONE offline usb:1-2 transport_id:8' ;;
@@ -82,6 +88,23 @@ MOCK_UID=0 run_case 1 --yes
 [[ ! -e "$MOCK_LOG" ]]
 run_case 1 --unknown
 [[ ! -e "$MOCK_LOG" ]]
+# The preview judges the USB function set read-only, matching boot recovery.
+run_case 0 --dry-run
+grep -Fq 'Phone USB state:   not read (phone not authorized' "$scratch/output"
+MOCK_DISCOVERY=pinned MOCK_USB_STATE=hisuite,mtp,mass_storage,adb run_case 0 --dry-run
+grep -Fq 'Phone USB state:   off (hisuite,mtp,mass_storage,adb); an unhealthy boot WAN receives one enable request' "$scratch/output"
+MOCK_DISCOVERY=pinned MOCK_USB_STATE=rndis,adb run_case 0 --dry-run
+grep -Fq 'Phone USB state:   on (rndis,adb)' "$scratch/output"
+MOCK_DISCOVERY=pinned MOCK_USB_STATE=hisuite,mtp,mass_storage run_case 0 --dry-run
+grep -Fq 'no ADB function' "$scratch/output"
+# shellcheck disable=SC2016
+MOCK_DISCOVERY=pinned MOCK_USB_STATE='$(reboot)' run_case 0 --dry-run
+grep -Fq 'not recognized (malformed or empty)' "$scratch/output"
+MOCK_DISCOVERY=pinned run_case 0 --dry-run
+grep -Fq 'not read (USB state query failed)' "$scratch/output"
+# Another phone's transport is never queried.
+MOCK_DISCOVERY=one MOCK_USB_STATE=rndis,adb run_case 0 --dry-run
+grep -Fq 'not read (phone not authorized' "$scratch/output"
 # Saved values work even when USB networking is absent. Explicit settings win.
 cat > "$INSTALL_CONFIG_FILE" <<CONFIG
 PHONE_SERIAL=SAVED_PHONE

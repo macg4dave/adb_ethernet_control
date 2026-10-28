@@ -40,7 +40,9 @@ path, and readiness services. Each answer is prefilled and editable, with tips
 for finding it manually. It reuses readable settings from an existing install;
 environment settings take priority. It shows the settings before installation. Run it
 as your normal user; it requests sudo when needed. Use `./install.sh --dry-run`
-to preview or `./install.sh --help` for unattended usage.
+to preview or `./install.sh --help` for unattended usage. The summary includes a
+read-only reading of the phone's `sys.usb.state` and how boot recovery judges it
+(on, off with one enable request, or not recognized).
 
 This requires sudo, verifies the unit, runs it, and enables it only after a
 successful run. It does not reboot the host. The optional user timer only

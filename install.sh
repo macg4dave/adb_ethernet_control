@@ -90,6 +90,34 @@ fi
 printf 'Use the phone USB serial (not a TCP address) and its host WAN interface.\n'
 prompt PHONE_SERIAL 'Authorized phone USB serial' 'Run adb devices -l with your existing server; look for a device with usb:. Unlock the phone and accept USB debugging authorization if needed.'
 [[ "$PHONE_SERIAL" =~ ^[a-zA-Z0-9._:-]+$ ]] || error 'Invalid phone serial.'
+# Read-only preview of how boot recovery will judge the phone's USB function set.
+usb_preview='not read (phone not authorized on an existing ADB server)'
+for port in 5038 5037; do
+    listing=$(timeout --kill-after=2s 3s "$ADB_BIN" -H 127.0.0.1 -P "$port" devices -l 2>/dev/null) || continue
+    transport=''
+    while read -r serial state details; do
+        [[ "$serial" == "$PHONE_SERIAL" && "$state" == device && " $details " == *' usb:'* ]] || continue
+        for token in $details; do
+            if [[ "$token" =~ ^transport_id:([0-9]+)$ ]]; then transport=${BASH_REMATCH[1]}; fi
+        done
+    done <<< "$listing"
+    [[ -n "$transport" ]] || continue
+    usb_preview='not read (USB state query failed)'
+    usb_state=$(timeout --kill-after=2s 5s "$ADB_BIN" -H 127.0.0.1 -P "$port" -t "$transport" \
+        shell -T -n getprop sys.usb.state 2>/dev/null) || break
+    usb_state=${usb_state//$'\r'/}
+    if [[ ! "$usb_state" =~ ^[a-z0-9_]+(,[a-z0-9_]+)*$ ]]; then
+        usb_preview='not recognized (malformed or empty); boot recovery retries, then makes no USB changes'
+    else
+        case ",$usb_state," in
+            *,rndis,*,ncm,*|*,ncm,*,rndis,*) usb_preview="not recognized ($usb_state); boot recovery makes no USB changes" ;;
+            *,rndis,*|*,ncm,*) usb_preview="on ($usb_state)" ;;
+            *,adb,*) usb_preview="off ($usb_state); an unhealthy boot WAN receives one enable request" ;;
+            *) usb_preview="not recognized ($usb_state, no ADB function); boot recovery makes no USB changes" ;;
+        esac
+    fi
+    break
+done
 if [[ -z "$WAN_INTERFACE" ]]; then
     matched=() networking=()
     for entry in "${INSTALL_SYS_CLASS_NET:-/sys/class/net}"/*; do
@@ -133,12 +161,15 @@ done
 printf '\n%sInstallation settings%s\n' "$bold" "$reset"
 printf '  Phone USB serial:  %s\n  WAN interface:     %s\n  ADB executable:    %s\n  Wait for services: %s\n' \
     "$PHONE_SERIAL" "$WAN_INTERFACE" "$ADB_BIN" "$READY_UNITS"
+printf '  Phone USB state:   %s\n' "$usb_preview"
 printf '  WAN check:         ping 8.8.8.8 through the phone interface\n'
 printf '  Connection wait:   20 seconds settling + up to 45 seconds for IPv4\n'
 printf '  Automatic cycling: disabled until independent restoration is verified\n\n'
 printf 'Installs system services and USB access rules, runs recovery now, and\n'
 printf 'enables boot recovery after a successful check. An unhealthy WAN may\n'
-printf 'receive one USB enable request. Local logs: /var/log/adb-wan-boot/\n\n'
+printf 'receive one USB enable request when the phone reports ADB without RNDIS\n'
+printf 'or NCM, including vendor sets such as hisuite,mtp,mass_storage,adb.\n'
+printf 'Local logs: /var/log/adb-wan-boot/\n\n'
 if "$dry_run"; then printf 'Preview complete. No installation performed.\n'; exit 0; fi
 if "$interactive"; then
     read -r -p 'Install with these settings? [Y/n] ' answer || error 'Input closed; installation canceled.'
