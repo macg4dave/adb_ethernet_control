@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Local test orchestration: no chat, network control channel, or remote callbacks.
+set -euo pipefail
+umask 077
+
+mode=${1:-}
+case "$mode" in
+    --check|--test-cycle) (($# == 1)) || exit 1 ;;
+    *) printf 'Usage: adb-wan-test --check|--test-cycle\n' >&2; exit 1 ;;
+esac
+
+recovery_bin=${RECOVERY_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-recover}
+test_timeout=${TEST_TIMEOUT:-600}
+[[ "$test_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || { printf 'Invalid TEST_TIMEOUT\n' >&2; exit 1; }
+log_root=${TEST_LOG_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/adb-ethernet-control/tests}
+mkdir -p -- "$log_root"
+run_dir=$(mktemp -d "$log_root/run-XXXXXXXX")
+printf 'Local test records: %s\n' "$run_dir"
+exec >> "$run_dir/output.log" 2>&1
+stage=starting
+started=$(date -u +%FT%TZ)
+write_result() {
+    local status=$1 code=$2
+    printf 'status=%s\nstage=%s\nmode=%s\nexit_code=%s\nstarted=%s\nupdated=%s\n' \
+        "$status" "$stage" "$mode" "$code" "$started" "$(date -u +%FT%TZ)" > "$run_dir/result.tmp"
+    mv -- "$run_dir/result.tmp" "$run_dir/result"
+}
+# Called by the EXIT trap.
+# shellcheck disable=SC2317
+finish() {
+    local code=$?
+    trap - EXIT
+    if ((code == 0)); then write_result passed "$code"; else write_result failed "$code"; fi
+    printf 'Test finished: exit=%s stage=%s\n' "$code" "$stage"
+    exit "$code"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+write_result running pending
+
+probe() {
+    local label=$1 code
+    shift
+    printf '\n== %s ==\n' "$label"
+    if timeout --kill-after=2s 10s "$@"; then return 0; else code=$?; fi
+    printf 'Diagnostic unavailable: exit=%s\n' "$code"
+    return 0
+}
+snapshot() {
+    printf '\nSnapshot: %s\n' "$(date -u +%FT%TZ)"
+    probe 'ADB transports' "${ADB_BIN:-adb}" -P "${ADB_SERVER_PORT:-5037}" devices -l
+    if [[ -n ${PHONE_SERIAL:-} ]]; then
+        probe 'Phone USB state' "${ADB_BIN:-adb}" -P "${ADB_SERVER_PORT:-5037}" -s "$PHONE_SERIAL" shell -T -n getprop sys.usb.state
+    fi
+    if [[ -n ${WAN_INTERFACE:-} ]]; then
+        probe 'Host addresses' ip -brief address show dev "$WAN_INTERFACE"
+        probe 'Host routes' ip -4 route show dev "$WAN_INTERFACE"
+        probe 'NetworkManager' nmcli -f GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS device show "$WAN_INTERFACE"
+    fi
+}
+
+stage=before
+write_result running pending
+snapshot
+stage=recovery
+write_result running pending
+code=0
+timeout --kill-after=15s "${test_timeout}s" "$recovery_bin" "$mode" || code=$?
+printf '\nRecovery command exit: %s\n' "$code"
+# Evidence collection must run even if recovery fails or the WAN stays offline.
+stage=after
+write_result running "$code"
+snapshot
+stage=complete
+exit "$code"

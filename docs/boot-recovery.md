@@ -1,5 +1,20 @@
 # Boot WAN recovery
 
+**Current status: not ready for boot deployment.** Both live HONOR tests
+required the user to restore USB Ethernet manually. The detached worker's
+log stopped during the off command without an off-state or restore result.
+The command may have blocked or its process may have been terminated; the
+available logs do not distinguish these causes. Increasing the WAN settling
+delay does not fix this earlier control failure.
+
+`USB_CYCLE_ENABLED` defaults to `0`. Checks and healthy-WAN no-op runs still
+work; any run that would cycle USB exits before making changes. Setting it
+to `1` is an experimental opt-in, not a verified solution. The installation
+instructions below describe the proposed deployment, not a recommendation
+to enable it in its current state.
+See [offline testing](offline-testing.md) for host-supervised tests that keep
+running when this AI's WAN connection disappears.
+
 ## Recovery policy
 
 `adb-wan-recover --check` waits for configured services and checks connectivity
@@ -28,7 +43,10 @@ cause a failed health check. Two endpoints reduce dependence on one address
 but do not prove the fault is USB. Only one cycle is allowed per run.
 
 Default waits: services 120 seconds, startup settling 15 seconds, initial WAN
-45 seconds, ADB 60 seconds, USB-off delay 3 seconds, restored WAN 60 seconds.
+45 seconds, ADB 60 seconds, USB-off delay 3 seconds, post-enable settling
+20 seconds, then restored WAN probes for 60 seconds. `POST_ENABLE_DELAY`
+allows for the observed 10–15 seconds between enabling USB Ethernet and
+usable WAN. The 60-second probe budget starts after this delay.
 Individual ADB calls are limited to 10 seconds and each HTTPS probe to 5
 seconds. A wait can overrun its budget by its in-flight probe and polling
 interval. The systemd job has a final 10-minute limit; increase it if you
@@ -36,16 +54,26 @@ increase the script's waits. A lock prevents overlapping runs sharing its
 path. Direct CLI runs use the installed service's lock when its runtime
 directory exists and is writable, otherwise the user's runtime directory.
 
-The off command is `adb shell svc usb setFunctions` (charging/default
-functions); the restore command is `adb shell svc usb setFunctions rndis`
-or `ncm`, matching the original state. Combined modes containing extra USB
+The phone runs a detached `nohup setsid sh` worker containing both the off
+command (`svc usb setFunctions`) and the restore (`svc usb setFunctions rndis`
+or `ncm`), with `OFF_DELAY` between them. It records the off state and restore
+exit code in `/data/local/tmp/adb-wan-cycle.log`. Every run uses a new ID so a
+stale record cannot count as success. Only fixed commands and validated
+integer/enum values enter the worker. Combined modes containing extra USB
 functions are rejected rather than silently dropping those functions.
-Android normally adds ADB while USB
-debugging is enabled, but vendor behavior must be verified. The script waits
-for the same authorized USB serial after turning networking off and attempts
-restoration even if the off command loses its response. A final bounded restore
-is attempted on an error or termination during that interval. Loss of ADB,
-power, or a hard kill can still require manual intervention on the phone.
+
+Both commands must run on the phone: during the first live test, turning
+networking off also removed ADB. The earlier host-driven sequence could not
+send the restore and required manual tethering restoration. It failed before
+WAN probing, so simply increasing the WAN timeout would not fix it.
+
+The host checks for the required detached-execution tools before starting,
+then waits for the authorized USB phone and the current worker's completion
+record. The phone can attempt restoration even while the host has no ADB or
+WAN connection. A final bounded host-side restore is attempted on a control
+failure when possible. Power loss, phone-side errors, or termination of the
+worker can still require manual intervention. The revised approach failed its
+attended cycle test; another USB control mechanism is needed before deployment.
 
 Exit codes: `0` healthy or restored, `1` configuration/readiness/control failure,
 `2` WAN unhealthy in check mode or still unhealthy after recovery. The service
@@ -134,6 +162,15 @@ hardcode a third-party DHCP service. Inspect dependencies before adding a
 drop-in so startup cannot wait on itself.
 
 ## Validate before enabling
+
+`--test-cycle` is an explicit manual hardware test: it requires a healthy WAN
+baseline, then performs one off/on cycle and checks connectivity afterward.
+It briefly interrupts the working WAN. Never use this mode in a boot unit.
+Use the same environment as `--check`, replacing that argument with
+`--test-cycle`, only when an actual USB interruption has been requested.
+The test also reads the USB state between off and restore. If networking was
+not observed off, it restores the original mode but reports the test as
+inconclusive even if the WAN is healthy afterward.
 
 First run a read-only check using environment variables for this host. With
 the original ADB server still running, use its port 5037; with the dedicated

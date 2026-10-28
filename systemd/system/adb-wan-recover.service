@@ -9,6 +9,7 @@ Type=oneshot
 User=dave
 SupplementaryGroups=adbwan
 Environment=HOME=/home/dave
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/etc/adb-ethernet-control/wan-recovery.env
 RuntimeDirectory=adb-wan-recover
 RuntimeDirectoryMode=0700

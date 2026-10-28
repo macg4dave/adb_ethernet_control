@@ -4,10 +4,11 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: adb-wan-recover --check|--recover
+Usage: adb-wan-recover --check|--recover|--test-cycle
 
 --check    Wait for startup and check WAN; never change USB functions.
 --recover  If WAN remains down and USB networking is enabled, cycle it once.
+--test-cycle  Explicit manual hardware test: require healthy WAN, then cycle once.
 
 Required environment: PHONE_SERIAL, WAN_INTERFACE.
 See docs/boot-recovery.md and config/wan-recovery.env.example.
@@ -19,7 +20,7 @@ die() { log "$*" >&2; exit 1; }
 mode=${1:-}
 case "$mode" in
     -h|--help) usage; exit 0 ;;
-    --check|--recover) (($# == 1)) || die 'specify one mode' ;;
+    --check|--recover|--test-cycle) (($# == 1)) || die 'specify one mode' ;;
     *) usage >&2; exit 1 ;;
 esac
 
@@ -38,6 +39,9 @@ HEALTH_GRACE=${HEALTH_GRACE:-45}
 RECOVERY_TIMEOUT=${RECOVERY_TIMEOUT:-60}
 POLL_INTERVAL=${POLL_INTERVAL:-3}
 OFF_DELAY=${OFF_DELAY:-3}
+POST_ENABLE_DELAY=${POST_ENABLE_DELAY:-20}
+USB_CYCLE_ENABLED=${USB_CYCLE_ENABLED:-0}
+[[ "$USB_CYCLE_ENABLED" == 0 || "$USB_CYCLE_ENABLED" == 1 ]] || die 'USB_CYCLE_ENABLED must be 0 or 1'
 PROBE_TIMEOUT=${PROBE_TIMEOUT:-5}
 PROBE_URLS=${PROBE_URLS:-https://1.1.1.1/cdn-cgi/trace https://1.0.0.1/cdn-cgi/trace}
 if [[ -w /run/adb-wan-recover ]]; then
@@ -45,7 +49,7 @@ if [[ -w /run/adb-wan-recover ]]; then
 else
     LOCK_FILE=${LOCK_FILE:-${XDG_RUNTIME_DIR:-/run/user/$UID}/adb-wan-recover.lock}
 fi
-for name in ADB_SERVER_PORT ADB_TIMEOUT READINESS_TIMEOUT PHONE_TIMEOUT STARTUP_DELAY HEALTH_GRACE RECOVERY_TIMEOUT POLL_INTERVAL OFF_DELAY PROBE_TIMEOUT; do
+for name in ADB_SERVER_PORT ADB_TIMEOUT READINESS_TIMEOUT PHONE_TIMEOUT STARTUP_DELAY HEALTH_GRACE RECOVERY_TIMEOUT POLL_INTERVAL OFF_DELAY POST_ENABLE_DELAY PROBE_TIMEOUT; do
     [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer"
 done
 ((ADB_SERVER_PORT <= 65535)) || die 'invalid ADB_SERVER_PORT'
@@ -115,13 +119,21 @@ wait_until 'host services' "$READINESS_TIMEOUT" ready || die "required services 
 log "Startup settling delay: ${STARTUP_DELAY}s."
 sleep "$STARTUP_DELAY"
 if wait_until 'phone WAN connectivity' "$HEALTH_GRACE" healthy; then
-    log 'WAN healthy; no changes needed.'
-    exit 0
+    if [[ "$mode" == --test-cycle ]]; then
+        log 'Healthy WAN baseline verified; proceeding with explicitly requested hardware test.'
+    else
+        log 'WAN healthy; no changes needed.'
+        exit 0
+    fi
+elif [[ "$mode" == --test-cycle ]]; then
+    log 'Test requires a healthy WAN baseline; no changes made.'
+    exit 2
 fi
 if [[ "$mode" == --check ]]; then
     log 'WAN unhealthy; check mode made no changes.'
     exit 2
 fi
+[[ "$USB_CYCLE_ENABLED" == 1 ]] || die 'USB cycling disabled: live HONOR tests required manual restoration; diagnostic checks remain available'
 wait_until 'authorized USB phone' "$PHONE_TIMEOUT" authorized_usb || die 'phone absent, unauthorized, offline, or not USB; no toggle performed'
 state=$(phone getprop sys.usb.state) || die 'cannot read phone USB state; no toggle performed'
 state=${state//$'\r'/}
@@ -133,8 +145,28 @@ esac
 [[ ",$state," == *,adb,* ]] || die 'USB state does not include ADB; refusing to risk losing control'
 [[ "$state" == "$function,adb" || "$state" == "adb,$function" ]] || die "unsupported combined USB state ($state); no toggle performed"
 # Check again immediately before disruption: networking may have recovered.
-if healthy; then log 'WAN recovered before toggle; no changes needed.'; exit 0; fi
+if [[ "$mode" != --test-cycle ]] && healthy; then
+    log 'WAN recovered before toggle; no changes needed.'
+    exit 0
+fi
 
+# Confirm the phone can run a detached restore before touching USB functions.
+phone 'command -v nohup >/dev/null && command -v setsid >/dev/null && test -w /data/local/tmp' || die 'phone cannot run detached USB recovery; no toggle performed'
+cycle_id="$BASHPID-$RANDOM"
+cycle_body=$(cat <<'PHONE'
+echo cycle_id=__CYCLE_ID__
+svc usb setFunctions
+sleep __OFF_DELAY__
+echo off_state=$(getprop sys.usb.state)
+svc usb setFunctions __FUNCTION__
+restore_exit=$?
+echo restore_exit=$restore_exit
+PHONE
+)
+cycle_body=${cycle_body//__CYCLE_ID__/$cycle_id}
+cycle_body=${cycle_body//__OFF_DELAY__/$OFF_DELAY}
+cycle_body=${cycle_body//__FUNCTION__/$function}
+remote_log=/data/local/tmp/adb-wan-cycle.log
 restore_pending=true
 # Called by the EXIT trap.
 # shellcheck disable=SC2317
@@ -147,16 +179,43 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-log "WAN unhealthy with $function enabled; performing one USB networking cycle."
-# Android's USB service normally retains ADB while debugging is enabled.
-# A USB re-enumeration can drop this command's ADB response, so always restore.
-phone svc usb setFunctions || log 'Off command failed or USB disconnected; continuing to restore.'
-sleep "$OFF_DELAY"
-wait_until 'ADB after USB re-enumeration' "$PHONE_TIMEOUT" authorized_usb || die 'ADB did not return; cannot restore automatically'
-phone svc usb setFunctions "$function" || die 'USB networking restore command failed'
+log "Mode $mode: performing one USB networking cycle ($function)."
+# Both commands run on the phone: this model loses ADB while USB networking is off.
+# The body contains only fixed commands and validated integer/enum substitutions.
+phone "umask 077; command nohup setsid sh -c '$cycle_body' >$remote_log 2>&1 </dev/null &" || log 'Cycle launch response lost; waiting for the detached phone worker.'
+wait_until 'ADB after phone-side USB cycle' "$PHONE_TIMEOUT" authorized_usb || die 'ADB did not return after phone-side restore'
+cycle_log=''
+# shellcheck disable=SC2317
+worker_finished() {
+    cycle_log=$(phone "cat $remote_log") || return 1
+    [[ $'\n'"$cycle_log"$'\n' == *$'\n'"cycle_id=$cycle_id"$'\n'* && $'\n'"$cycle_log"$'\n' == *$'\n'restore_exit=*$'\n'* ]]
+}
+wait_until 'phone-side restore completion' "$PHONE_TIMEOUT" worker_finished || die 'no completed restore record from phone worker'
+[[ $'\n'"$cycle_log"$'\n' == *$'\n'restore_exit=0$'\n'* ]] || die 'phone-side USB restore command failed'
 restore_pending=false
+off_verified=false
+while IFS= read -r record; do
+    [[ "$record" == off_state=* ]] || continue
+    off_state=${record#off_state=}
+    off_state=${off_state//$'\r'/}
+    if [[ -n "$off_state" && ",$off_state," != *",$function,"* ]]; then
+        off_verified=true
+        log "USB networking off state observed: $off_state."
+    else
+        log "USB networking off state not observed (state=$off_state)."
+    fi
+done <<< "$cycle_log"
+log "USB restored; allowing ${POST_ENABLE_DELAY}s for phone tethering and host DHCP to settle."
+sleep "$POST_ENABLE_DELAY"
 if wait_until 'restored WAN connectivity' "$RECOVERY_TIMEOUT" healthy; then
-    log 'WAN restored after one USB networking cycle.'
+    if [[ "$mode" == --test-cycle ]] && ! "$off_verified"; then
+        die 'WAN healthy, but USB-off state was not verified; hardware test inconclusive'
+    fi
+    if "$off_verified"; then
+        log 'WAN restored after one USB networking cycle.'
+    else
+        log 'WAN healthy after recovery attempt; USB-off state was not verified.'
+    fi
     exit 0
 fi
 log 'WAN still unhealthy after one cycle; stopping without further toggles.'

@@ -13,12 +13,19 @@ WAN of a Red Hat Enterprise Linux host, using ADB.
   networking off/on cycle, followed by connectivity verification. Never cycle
   a healthy WAN, repeatedly reset the phone, or alter LAN/firewall/SELinux
   configuration as part of recovery. Do not use ADB root.
+- `--test-cycle` is a separate, explicitly requested manual hardware test. It
+  requires a healthy WAN baseline and cycles once. Never use it for automatic
+  boot recovery or without a user's request to test the real USB cycle.
 - Always select a specific USB transport before issuing phone commands. Handle
   absent, unauthorized, offline, and multiple devices explicitly.
 - Bound external calls with timeouts. Treat phone output as data; never eval it.
 - Android versions and vendors differ: report failed probes and partial results.
 - Keep runtime dependencies small. Do not require Python or Node.js.
 - Do not commit device reports, serial numbers, ADB keys, or credentials.
+- Live WAN tests must be owned by the host's systemd system manager, with
+  local logs, bounded stages, and a final result independent of chat/IDE
+  connectivity. Do not use an AI tool's background process as the supervisor.
+  USB cycling stays disabled until an independent restore method is verified.
 
 ## Validation
 

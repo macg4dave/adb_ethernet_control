@@ -43,7 +43,22 @@ During inspection on 28 October 2026:
   `svc usb getFunctions`. Its `cmd usb` and `cmd tethering` services do not
   implement shell commands.
 
-Live WAN recovery and unattended cold-boot behavior have **not** been verified.
+The first live cycle failed: switching off USB networking also removed ADB,
+so the host could not issue its restore command. The user restored tethering
+manually. The user also observed a 10–15 second delay between enabling USB
+Ethernet and WAN availability. Recovery now schedules the entire off/wait/on
+sequence on the phone and allows a configurable 20-second settling interval
+before WAN retries. A non-disruptive detached phone-worker probe succeeded.
+However, the second live cycle also required manual restoration. Its worker
+log ended during the off command, without an off-state or restore result.
+This does not establish whether the command blocked or the worker was killed,
+but shows that detached shell execution alone did not solve restoration.
+
+USB cycling is now disabled by default (`USB_CYCLE_ENABLED=0`). Normal checks
+and healthy-WAN no-op behavior remain available. Boot recovery must not be
+enabled until a control mechanism that survives USB changes is verified.
+
+Automatic WAN recovery and unattended cold-boot behavior have **not** been verified.
 Changing USB functions is not the same API as changing the Settings tethering
 switch. This phone must be tested to establish that cycling RNDIS causes its
 tethering service and DHCP server to recover, and that ADB survives the cycle.

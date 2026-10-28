@@ -12,6 +12,7 @@ left alone. Implementation is Bash, ADB, and systemd.
 - [Project purpose, findings, and acceptance criteria](docs/project.md)
 - [Boot recovery configuration, installation, and validation](docs/boot-recovery.md)
 - [Read-only diagnostics and USB troubleshooting](docs/diagnostics.md)
+- [Local tests that keep running without the WAN or AI](docs/offline-testing.md)
 
 ```bash
 ./bin/adb-ethernet-control devices
@@ -23,8 +24,9 @@ PHONE_SERIAL=YOUR_USB_SERIAL WAN_INTERFACE=enp48s0f4u2 \
 
 Boot recovery is supplied as system units under `systemd/system/` and is not
 installed or enabled automatically. The optional `systemd/user/` timer only
-prints diagnostic reports. The phone-specific USB toggle and unattended reboot
-recovery still need controlled hardware validation before enabling boot use.
+prints diagnostic reports. **USB cycling is disabled by default:** both live
+HONOR tests required manual tethering restoration. Read-only checks work,
+but automatic boot recovery is not ready to deploy.
 
 See `AGENTS.md` and `CLAUDE.md` for shared development instructions. Checks
 cover ShellCheck, mock-device regression tests, and systemd unit validation;
