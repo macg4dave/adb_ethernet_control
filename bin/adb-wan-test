@@ -2,11 +2,12 @@
 # Local test orchestration: no chat, network control channel, or remote callbacks.
 set -euo pipefail
 umask 077
+if [[ ${TEST_SHARED_LOGS:-0} == 1 ]]; then umask 027; fi
 
 mode=${1:-}
 case "$mode" in
-    --check|--test-cycle) (($# == 1)) || exit 1 ;;
-    *) printf 'Usage: adb-wan-test --check|--test-cycle\n' >&2; exit 1 ;;
+    --check|--test-cycle|--host-cycle) (($# == 1)) || exit 1 ;;
+    *) printf 'Usage: adb-wan-test --check|--test-cycle|--host-cycle\n' >&2; exit 1 ;;
 esac
 
 recovery_bin=${RECOVERY_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-recover}
@@ -15,6 +16,7 @@ test_timeout=${TEST_TIMEOUT:-600}
 log_root=${TEST_LOG_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/adb-ethernet-control/tests}
 mkdir -p -- "$log_root"
 run_dir=$(mktemp -d "$log_root/run-XXXXXXXX")
+if [[ ${TEST_SHARED_LOGS:-0} == 1 ]]; then chmod 750 "$run_dir"; fi
 printf 'Local test records: %s\n' "$run_dir"
 exec >> "$run_dir/output.log" 2>&1
 stage=starting
@@ -66,7 +68,12 @@ snapshot
 stage=recovery
 write_result running pending
 code=0
-timeout --kill-after=15s "${test_timeout}s" "$recovery_bin" "$mode" || code=$?
+if [[ "$mode" == --host-cycle ]]; then
+    host_cycle_bin=${HOST_CYCLE_BIN:-$(dirname -- "${BASH_SOURCE[0]}")/adb-wan-host-cycle}
+    timeout --kill-after=15s "${test_timeout}s" "$host_cycle_bin" || code=$?
+else
+    timeout --kill-after=15s "${test_timeout}s" "$recovery_bin" "$mode" || code=$?
+fi
 printf '\nRecovery command exit: %s\n' "$code"
 # Evidence collection must run even if recovery fails or the WAN stays offline.
 stage=after

@@ -35,6 +35,11 @@ output=$(MOCK_EXIT=0 ./bin/adb-wan-test --check)
 record=${output#Local test records: }
 grep -Fxq 'status=passed' "$record/result"
 grep -Fxq 'exit_code=0' "$record/result"
+output=$(HOST_CYCLE_BIN="$RECOVERY_BIN" MOCK_EXIT=0 TEST_SHARED_LOGS=1 ./bin/adb-wan-test --host-cycle)
+record=${output#Local test records: }
+grep -Fxq 'mode=--host-cycle' "$record/result"
+grep -Fxq 'status=passed' "$record/result"
+[[ $(stat -c %a "$record") == 750 && $(stat -c %a "$record/result") == 640 ]]
 code=0
 output=$(TEST_TIMEOUT=1 MOCK_SLEEP=5 ./bin/adb-wan-test --check) || code=$?
 [[ "$code" == 124 ]]

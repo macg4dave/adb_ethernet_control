@@ -110,6 +110,53 @@ systemd supervision. `TEST_LOG_ROOT` and `RECOVERY_BIN` can override paths.
 
 ## WAN restoration is a separate requirement
 
+### Host-side outage test
+
+The authorized `--host-cycle` test changes only the host's NetworkManager
+connection. It never sends `svc usb` commands or changes the phone's tethering
+setting. Start it from a local terminal with:
+
+```bash
+WAN_INTERFACE=enp48s0f4u2 \
+  READY_UNITS="NetworkManager.service pc101-technitium.service" \
+  ./scripts/start-local-check --host-cycle
+```
+
+The launcher captures the active profile UUID, installs the test snapshot, and
+starts `adb-wan-host-test.service` as root so nmcli can control the connection
+without interactive authorization while offline. Before disconnecting, the
+coordinator checks the active profile, RNDIS/NCM driver, authorized ADB/USB state,
+and healthy WAN. It then arms a **separate systemd timer** to reactivate that
+same profile after 60 seconds, independent of the main test's process group.
+If arming the timer fails, the WAN is left alone.
+
+The coordinator deactivates only the captured profile, confirms the outage
+and unchanged ADB/USB state, waits five seconds, then reactivates that profile
+on the same interface. It cancels the fallback only after activation succeeds.
+It allows 20 seconds for settling, then probes the WAN for up to 60 seconds.
+An exit trap makes a final local activation attempt on failure; if that also
+fails, the separate fallback stays armed. This fallback cannot guarantee WAN
+access during a carrier outage, but it restores the host's connection request.
+
+Results are in `/var/log/adb-wan-host-test/run-*/result` and `output.log`.
+They are root-owned and readable by the invoking user's primary group. Inspect
+the unit journal with `journalctl -u adb-wan-host-test`. No boot services or
+timers are enabled by this launch. The installed snapshot cannot be replaced
+while either local test unit is active.
+
+Passing this test verifies supervised host-side disconnection/reconnection,
+not phone USB toggling or recovery from the reported reboot failure. Phone
+USB cycling remains disabled.
+
+The attended systemd-managed host-cycle test passed on 28 October 2026 in
+42 seconds. The profile was down for approximately six seconds, ADB remained
+available, and WAN checks passed after settling. The fallback was armed and
+then canceled after normal restoration; its actual firing path has not yet
+been tested on hardware. The saved run is `run-y47RbfLh` in the host-test log
+directory (host-local evidence, not a repository artifact).
+
+### Phone-side outage remains unresolved
+
 Keeping a test running offline does not make an unreliable phone toggle safe.
 The last two live cycles required manual restoration. The detached phone
 worker did not reach its restore result, and the exact reason is unresolved.

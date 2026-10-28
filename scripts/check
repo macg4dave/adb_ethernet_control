@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-sources=(bin/adb-ethernet-control bin/adb-wan-recover bin/adb-wan-test scripts/check scripts/start-local-check tests/cli.sh tests/recovery.sh tests/local-runner.sh tests/launcher.sh)
+sources=(bin/adb-ethernet-control bin/adb-wan-recover bin/adb-wan-test bin/adb-wan-host-cycle scripts/check scripts/start-local-check tests/cli.sh tests/recovery.sh tests/local-runner.sh tests/launcher.sh tests/host-cycle.sh)
 for source in "${sources[@]}"; do bash -n "$source"; done
 if command -v shellcheck >/dev/null; then
     shellcheck "${sources[@]}"
@@ -13,6 +13,7 @@ bash tests/cli.sh
 bash tests/recovery.sh
 bash tests/local-runner.sh
 bash tests/launcher.sh
+bash tests/host-cycle.sh
 # Verify against the checkout executable before anything has been installed.
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT

@@ -16,6 +16,10 @@ WAN of a Red Hat Enterprise Linux host, using ADB.
 - `--test-cycle` is a separate, explicitly requested manual hardware test. It
   requires a healthy WAN baseline and cycles once. Never use it for automatic
   boot recovery or without a user's request to test the real USB cycle.
+- The explicitly authorized `--host-cycle` test deactivates/reactivates only
+  the configured phone WAN NetworkManager profile. Arm an independent local
+  restore timer before deactivation. Never change phone USB functions or LAN
+  profiles in this test.
 - Always select a specific USB transport before issuing phone commands. Handle
   absent, unauthorized, offline, and multiple devices explicitly.
 - Bound external calls with timeouts. Treat phone output as data; never eval it.

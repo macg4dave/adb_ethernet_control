@@ -15,6 +15,10 @@ cat > "$scratch/bin/restorecon" <<'MOCK'
 #!/usr/bin/env bash
 exit 99
 MOCK
+cat > "$scratch/bin/nmcli" <<'MOCK'
+#!/usr/bin/env bash
+printf '11111111-2222-3333-4444-555555555555\n'
+MOCK
 cat > "$scratch/bin/sudo" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -26,14 +30,22 @@ case "$1" in
             mkdir -p "$MOCK_ROOT$snapshot"
         else
             # Do not touch the host: stage the two source files under MOCK_ROOT.
-            cp -- "${@:7:2}" "$MOCK_ROOT$snapshot/"
+            cp -- "${@:7:3}" "$MOCK_ROOT$snapshot/"
         fi
         ;;
     restorecon)
         [[ -f "$MOCK_ROOT$snapshot/adb-wan-test" && -f "$MOCK_ROOT$snapshot/adb-wan-recover" ]]
         ;;
     systemd-run)
-        [[ "${@: -2:1}" == "$snapshot/adb-wan-test" && "${@: -1}" == --check ]]
+        [[ "${@: -2:1}" == "$snapshot/adb-wan-test" ]]
+        case "${@: -1}" in
+            --check) ;;
+            --host-cycle)
+                [[ " $* " == *' --property=User=root '* && " $* " == *' --setenv=TEST_SHARED_LOGS=1 '* ]]
+                [[ " $* " == *' --setenv=WAN_CONNECTION_UUID=11111111-2222-3333-4444-555555555555 '* ]]
+                ;;
+            *) exit 99 ;;
+        esac
         [[ " $* " == *' --setenv=USB_CYCLE_ENABLED=0 '* ]]
         [[ " $* " == *' --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin '* ]]
         grep -q '^restorecon ' "$MOCK_LOG"
@@ -41,10 +53,12 @@ case "$1" in
     *) exit 99 ;;
 esac
 MOCK
-chmod +x "$scratch/bin/systemctl" "$scratch/bin/restorecon" "$scratch/bin/sudo"
+chmod +x "$scratch/bin/systemctl" "$scratch/bin/restorecon" "$scratch/bin/sudo" "$scratch/bin/nmcli"
 ./scripts/start-local-check > "$scratch/output"
 cmp bin/adb-wan-test "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-test"
 cmp bin/adb-wan-recover "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-recover"
+cmp bin/adb-wan-host-cycle "$MOCK_ROOT/usr/local/bin/adb-wan-local-check/adb-wan-host-cycle"
+./scripts/start-local-check --host-cycle > "$scratch/output"
 : > "$MOCK_LOG"
 code=0
 MOCK_UNIT_STATE=activating ./scripts/start-local-check > "$scratch/output" 2>&1 || code=$?

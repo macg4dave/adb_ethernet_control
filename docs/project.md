@@ -58,6 +58,17 @@ USB cycling is now disabled by default (`USB_CYCLE_ENABLED=0`). Normal checks
 and healthy-WAN no-op behavior remain available. Boot recovery must not be
 enabled until a control mechanism that survives USB changes is verified.
 
+A separate manually launched host-side test now exercises NetworkManager
+profile down/up while preserving the phone's USB mode. Its independent systemd
+restore timer is armed before the outage. It has mock coverage for coordinator
+failure, interruption, and failed activation. The live systemd-managed test
+passed on 28 October 2026: the profile was deactivated, the host-side outage
+was observed while ADB remained available, and the profile reactivated about
+six seconds later. After the 20-second settling interval, WAN probes passed.
+The complete run took 42 seconds with exit code 0. The independent fallback
+timer was armed before the outage and canceled after successful activation;
+the fallback itself did not need to fire. No phone USB functions changed.
+
 Automatic WAN recovery and unattended cold-boot behavior have **not** been verified.
 Changing USB functions is not the same API as changing the Settings tethering
 switch. This phone must be tested to establish that cycling RNDIS causes its

@@ -2,6 +2,20 @@
 # Invoke from a local terminal: sudo authenticates once, systemd owns the job.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+mode=${1:---check}
+case "$mode" in --check|--host-cycle) ;; *) printf 'Usage: start-local-check [--check|--host-cycle]\n' >&2; exit 1 ;; esac
+unit=adb-wan-local-check
+service_user=$(id -un)
+log_root=/var/log/adb-wan-test
+shared_logs=0
+uuid=''
+if [[ "$mode" == --host-cycle ]]; then
+    unit=adb-wan-host-test
+    service_user=root
+    log_root=/var/log/adb-wan-host-test
+    shared_logs=1
+    uuid=$(nmcli -g GENERAL.CON-UUID device show "${WAN_INTERFACE:?Set WAN_INTERFACE}")
+fi
 : "${WAN_INTERFACE:?Set WAN_INTERFACE to the phone host interface}"
 adb_bin=${ADB_BIN:-$(command -v adb)}
 adb_port=${ADB_SERVER_PORT:-5037}
@@ -9,39 +23,42 @@ serial=${PHONE_SERIAL:-$(timeout 10s "$adb_bin" -P "$adb_port" -d get-serialno)}
 [[ -n "$serial" && "$serial" != unknown ]] || { printf 'No unique USB phone found\n' >&2; exit 1; }
 [[ "$adb_port" =~ ^[1-9][0-9]{0,4}$ ]] || exit 1
 service_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-for tool in timeout curl ip systemctl flock; do
+for tool in timeout curl ip systemctl flock nmcli systemd-run; do
     if ! (PATH=$service_path; command -v "$tool" >/dev/null); then
         printf 'Required command missing from service PATH: %s\n' "$tool" >&2
         exit 1
     fi
 done
-state=$(systemctl show adb-wan-local-check.service -p ActiveState --value)
+for other_unit in adb-wan-local-check adb-wan-host-test; do
+state=$(systemctl show "$other_unit.service" -p ActiveState --value)
 case "$state" in
     active|activating|deactivating)
         printf 'A local check is already running; leaving its code untouched.\n' >&2
         exit 1
         ;;
 esac
+done
 snapshot=/usr/local/bin/adb-wan-local-check
 printf 'Installing the test snapshot in %s with normal SELinux labels.\n' "$snapshot"
 sudo install -d -m755 -o root -g root "$snapshot"
-sudo install -m755 -o root -g root "$repo/bin/adb-wan-test" "$repo/bin/adb-wan-recover" "$snapshot/"
+sudo install -m755 -o root -g root "$repo/bin/adb-wan-test" "$repo/bin/adb-wan-recover" "$repo/bin/adb-wan-host-cycle" "$snapshot/"
 if command -v restorecon >/dev/null; then
     sudo restorecon -RF "$snapshot"
 fi
-printf 'Launching a read-only test under the system manager. No USB cycle or reboot.\n'
-sudo systemd-run --unit=adb-wan-local-check --collect --no-block \
-    --property=Type=oneshot --property="User=$(id -un)" \
-    --property=LogsDirectory=adb-wan-test --property=LogsDirectoryMode=0700 \
+printf 'Launching %s under the system manager. No phone USB cycle or reboot.\n' "$mode"
+sudo systemd-run --unit="$unit" --collect --no-block \
+    --property=Type=oneshot --property="User=$service_user" --property="Group=$(id -gn)" \
+    --property="LogsDirectory=${log_root##*/}" --property=LogsDirectoryMode=0750 \
     --property=TimeoutStartSec=15min --property=UMask=0077 \
     --setenv="HOME=$HOME" --setenv="PATH=$service_path" \
     --setenv="ADB_BIN=$adb_bin" --setenv="ADB_SERVER_PORT=$adb_port" \
     --setenv="PHONE_SERIAL=$serial" --setenv="WAN_INTERFACE=$WAN_INTERFACE" \
+    --setenv="WAN_CONNECTION_UUID=$uuid" --setenv="TEST_SHARED_LOGS=$shared_logs" \
     --setenv="READY_UNITS=${READY_UNITS:-NetworkManager.service}" \
-    --setenv=TEST_LOG_ROOT=/var/log/adb-wan-test \
+    --setenv="TEST_LOG_ROOT=$log_root" \
     --setenv=LOCK_FILE=/var/log/adb-wan-test/check.lock \
     --setenv=USB_CYCLE_ENABLED=0 \
-    "$snapshot/adb-wan-test" --check
+    "$snapshot/adb-wan-test" "$mode"
 printf 'The local job continues without this terminal or chat.\n'
-printf 'Read logs with: journalctl -u adb-wan-local-check\n'
-printf 'Saved results: /var/log/adb-wan-test/run-*/result\n'
+printf 'Read logs with: journalctl -u %s\n' "$unit"
+printf 'Saved results: %s/run-*/result\n' "$log_root"
