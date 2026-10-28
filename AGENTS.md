@@ -36,6 +36,7 @@ Before editing, read the rules for the files you touch:
 | `adb-wan boot` | `adb-wan` (the service) | at most one recovery action |
 | `adb-wan restore` | `adb-wan` (`ExecStopPost=`) | enable only, if pending |
 | `adb-wan test-usb-toggle` | root launches, `adb-wan` runs | one off/on, on request |
+| `adb-wan test-usb-enable` | root launches, `adb-wan` runs | with tethering off: wait for ADB, enable rndis once, on request |
 
 ## Users and privileges
 
@@ -112,9 +113,10 @@ the host off from the Internet with nobody able to log in remotely.
 - Every external call has a timeout. Phone output is untrusted data: parse it,
   validate it, never pass it to a shell.
 - WAN health = a global IPv4 address on `wan.interface` **and** an IPv4 ping
-  to `8.8.8.8` bound to that interface. After a recovery action, WAN must pass
-  twice, `confirm_interval_secs` apart; the second check decides. Log one
-  final error with the USB state and stop.
+  to `8.8.8.8` bound to that interface. Judge it from events, not delays:
+  USB Ethernet off means act now; on means wait for NetworkManager to finish
+  (connected or failed) first. After an action, done as soon as WAN works.
+  If it never does, log one final error with the USB state and stop.
 - Exit codes: `0` healthy or restored, `1` config/readiness/control failure,
   `2` WAN still down on the final check.
 
@@ -152,7 +154,7 @@ Boot behavior is verified by reading the logs after real reboots, so every
 
 - First line: program version, boot ID, config path, key config values
   (interface, serial redacted to its last 4 characters, cycle enabled).
-- Every stage logs start and end with elapsed time: readiness, initial WAN
+- Every stage logs start and end with elapsed time: readiness check, WAN
   check, ADB server start, phone selection, USB state read, action, waits,
   final checks.
 - Every observation is logged with its raw value (USB state, transport list

@@ -97,6 +97,96 @@ design to copy.
   was killed.
 - Logs say what the program will do *before* it does it.
 
+## Rust version: first hardware results (2026-10-28)
+
+Install and `test-usb-toggle` run at 21:21:45 GMT, record
+`/var/log/adb-wan/test-2026-10-28T212145Z/`. **Passed**, no manual help.
+
+- The installer removed the old Bash units, scripts and `boot.env`. The key
+  the old root-run server used in `/var/lib/adb-wan` was handed to the
+  `adb-wan` user (uid 966); the phone did not ask to authorize again.
+- Everything ran as `adb-wan` under the sandboxed unit: our ADB server on
+  5038 with no competing server, the ping bound to `enp48s0f4u2` with
+  `CAP_NET_RAW`, and `systemd-run` accepted every shared property.
+- `svc usb setFunctions` returned **exit 255** with stdout
+  `setCurrentFunctions opId:1` for both off and on, although both worked.
+  This confirms: judge by observed state, never by the exit status.
+- `mtp` kept ADB alive. Off (`mtp,adb`) was observed 2.5 s after the
+  command, on (`rndis,adb`) 2.5 s after that. The transport ID changed
+  1 → 2 (re-enumeration), and re-selecting the phone handled it.
+- WAN passed straight after "on" was observed (same address
+  192.168.232.106/24) and again 10 s later. The 10–15 s delay seen with the
+  Settings switch did not occur here.
+- `ExecStopPost=` ran after the test, saw no restore pending, did nothing.
+- The installer's own `boot` run: WAN healthy → `result=healthy-no-action`
+  in under a second, ADB not started.
+
+Still unverified: the `ExecStopPost=` restore actually re-enabling USB
+after a killed run, the enable-from-off path at boot, and an attended
+reboot. `recovery.usb_cycle_enabled` stays false until the toggle has
+passed a few more times.
+
+## Rehearsal: tethering switched off in Settings (2026-10-28 21:43)
+
+- **Any test that turns USB Ethernet off takes this host offline, including
+  the AI session.** Such tests must run unattended under systemd; results are
+  read from the journal afterwards.
+- With tethering switched off in the phone's Settings, the phone
+  re-enumerated as `339b:107d` and **our freshly started ADB server never
+  listed it** (120 s). Nothing could be switched; the user re-enabled
+  tethering by hand.
+- `107d` is the "no USB Ethernet" product ID: the passing toggle test's
+  `mtp,adb` state was also `107d`, and ADB worked there (the server was
+  already running and followed the re-enumeration). Tethering on is `108a`
+  with interfaces `ef0401,0a0000,ff4201` (RNDIS + ADB).
+- Device node permissions were not the cause: the udev rule matches the
+  serial (same in both modes) and the node was `root:adb-wan 0660`.
+- Open question: in the Settings-off mode, does the phone offer an ADB
+  interface (`ff4201`) at all, and does it keep the same vendor ID, serial and
+  port? Every run now logs an lsusb-style scan of all USB devices (port,
+  IDs, names, serial, interfaces, node owner/mode) at the start and each time
+  it changes (`usb change ... removed=[...] added=[...]`), plus the raw
+  `adb devices` output while waiting for the phone. Tethering on today:
+  port `7-2`, `339b:108a`, interfaces `0a0000,ef0401,ff4201`. If there is no ADB interface, this
+  failure cannot be fixed over ADB.
+
+### Answer (21:53 run, with the lsusb-style scan)
+
+- Settings-off mode: same port `7-2`, same `339b`, same serial, product
+  `107d`, **only interface `ffff00` (vendor-specific); no ADB interface**.
+  `adb devices` was empty for the whole 120 s. The program reported
+  "offers no ADB interface in this USB mode" and changed nothing. Over ADB
+  this state cannot be fixed.
+- So `107d` is used both for `mtp,adb` (toggle test: ADB present) and for
+  this charge-only-like mode without ADB. The interface list, not the
+  product ID, tells them apart.
+- Likely phone-side fix to try: Developer options → "Allow ADB debugging in
+  charge only mode" (HONOR/Huawei disable ADB in charge-only mode by default).
+- After the run, at 22:04:28 the user switched tethering on; the phone came
+  up as `108a` and **dropped itself back to `107d` within a second**, with
+  adb-wan not running. The second attempt (22:05:17) stayed on. The phone
+  can bounce out of tethering by itself.
+
+### Fixed: tethering off in Settings is now recoverable (22:27, `test-usb-enable`)
+
+Record `/var/log/adb-wan/test-enable-2026-10-28T222742Z/`: **passed**.
+
+- With **Developer options → "Allow ADB debugging in charge only mode" ON**
+  (it seems to apply only after the phone reconnects), the Settings-off mode
+  is `107d` with interfaces **`ff4201,ffff00`** (ADB present) and
+  `sys.usb.state=mtp,adb`. Before, the same mode had only `ffff00`.
+- Sequence: tethering off 22:27:55 → phone back on ADB 22:27:58 →
+  `svc usb setFunctions rndis` → `rndis,adb` observed 1.5 s later → WAN up
+  immediately (same address).
+- Separate problem found on the way: a desktop ADB server on 127.0.0.1:5037
+  (started by some `adb` command in the user session at 21:56) claimed the
+  phone, so our server listed nothing even with tethering on. Only one ADB
+  server can hold the phone; whichever claims it first after it reconnects
+  wins. The program now names this case in the log; stop it with
+  `adb kill-server`.
+- Required phone setup, therefore: USB debugging ON, "Allow ADB debugging in
+  charge only mode" ON, and this host's key authorized ("Always allow").
+
 ## Old defaults (for reference, not requirements)
 
 | Setting | Old value | Note |

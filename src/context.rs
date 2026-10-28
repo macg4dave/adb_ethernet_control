@@ -4,6 +4,7 @@ use crate::adb::Adb;
 use crate::config::Config;
 use crate::host::Host;
 use crate::log::Log;
+use crate::recovery::cycle::UsbWatch;
 use crate::recovery::marker::Markers;
 use crate::wait::Clock;
 
@@ -21,4 +22,6 @@ pub struct Ctx<'a> {
     pub log: &'a Log,
     /// Runtime markers.
     pub markers: &'a Markers,
+    /// Logs USB changes (lsusb-style, with ports) as they happen.
+    pub usb: &'a UsbWatch,
 }

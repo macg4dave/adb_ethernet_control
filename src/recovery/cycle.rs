@@ -1,16 +1,61 @@
 //! The recovery steps shared by `boot`, `restore` and the manual test: waits
 //! for the phone, the single enable or off/on cycle, and the WAN checks.
 
-use std::time::Duration;
+use std::cell::RefCell;
 
-use crate::adb::device::{Selection, TransportId};
+use crate::adb::device::{self, Selection, TransportId};
 use crate::adb::usb_state::{NetFunction, UsbEthernet, UsbState};
 use crate::adb::{self, set_functions};
 use crate::context::Ctx;
 use crate::error::{Error, Result};
+use crate::limits;
 use crate::log::quote;
+use crate::net::network_manager::NmState;
 use crate::net::{WanHealth, wan_health};
+use crate::usb::{self, UsbDevice};
 use crate::wait::{Waited, wait_until};
+
+/// Logs the lsusb-style scan whenever it changes, with what disappeared and
+/// appeared, so a phone that changes vendor ID, serial or port when USB
+/// Ethernet is switched shows up in the journal as a before/after pair.
+#[derive(Default)]
+pub struct UsbWatch {
+    last: RefCell<Option<Vec<UsbDevice>>>,
+}
+
+impl UsbWatch {
+    /// Scans USB and logs it if it differs from the last scan logged.
+    pub fn check(&self, ctx: &Ctx<'_>, at: &str) {
+        let now = ctx.host.usb_scan();
+        let mut last = self.last.borrow_mut();
+        if let Some(before) = last.as_ref() {
+            if *before == now {
+                return;
+            }
+            let gone: Vec<String> = before
+                .iter()
+                .filter(|d| !now.contains(d))
+                .map(UsbDevice::describe)
+                .collect();
+            let new: Vec<String> = now
+                .iter()
+                .filter(|d| !before.contains(d))
+                .map(UsbDevice::describe)
+                .collect();
+            ctx.log.info(format_args!(
+                "usb change at={at} removed=[{}] added=[{}]",
+                gone.join(" | "),
+                new.join(" | ")
+            ));
+        }
+        ctx.log.info(format_args!(
+            "usb scan at={at} devices={}: {}",
+            now.len(),
+            usb::lsusb(&now)
+        ));
+        *last = Some(now);
+    }
+}
 
 /// Waits for the configured phone to be listed, authorized and on USB.
 pub fn wait_phone(ctx: &Ctx<'_>) -> Result<TransportId> {
@@ -19,12 +64,27 @@ pub fn wait_phone(ctx: &Ctx<'_>) -> Result<TransportId> {
         ctx.clock,
         ctx.log,
         "phone",
-        ctx.config.timing.phone_timeout_secs.get(),
-        ctx.config.timing.poll_interval_secs.get(),
-        || match adb::select_phone(ctx.adb, serial) {
-            Ok(Selection::Selected(transport)) => Ok(transport),
-            Ok(other) => Err(other.problem().unwrap_or_default()),
-            Err(e) => Err(e.to_string()),
+        limits::WAIT,
+        limits::POLL,
+        || {
+            ctx.usb.check(ctx, "phone-wait");
+            let listing = ctx.adb.devices().map_err(|e| e.to_string())?;
+            match device::select(&device::parse(&listing), serial) {
+                Selection::Selected(transport) => Ok(transport),
+                // Everything needed to tell "no ADB in this USB mode" from
+                // "permissions" or "another server" from the journal alone.
+                other => Err(format!(
+                    "{}; adb_devices=[{}]; phone_usb={}",
+                    other.problem().unwrap_or_default(),
+                    listing
+                        .lines()
+                        .filter(|l| !l.trim().is_empty() && !l.starts_with("List of"))
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    usb::find_phone(&ctx.host.usb_scan(), serial.as_str())
+                        .map_or_else(|| "absent".into(), UsbDevice::describe)
+                )),
+            }
         },
     );
     match waited {
@@ -34,18 +94,49 @@ pub fn wait_phone(ctx: &Ctx<'_>) -> Result<TransportId> {
             Ok(value)
         }
         Waited::TimedOut { last, .. } => {
-            if ctx.host.usb_serial_present(serial) {
-                ctx.log.warn(
-                    "phone is attached on USB but our ADB server cannot use it: another ADB \
-                     server (e.g. a desktop adb on port 5037) may hold it, the udev rule may \
-                     be missing, or the phone has not authorized this host's key",
-                );
-            } else {
-                ctx.log
-                    .warn("no USB device with the phone's serial is attached");
-            }
+            explain_unreachable(ctx);
             Err(Error::Control(format!("phone not available: {last}")))
         }
+    }
+}
+
+/// Says in plain words why ADB could not reach the phone, from the kernel's
+/// view of USB.
+fn explain_unreachable(ctx: &Ctx<'_>) {
+    let serial = ctx.config.phone.serial.as_str();
+    let scan = ctx.host.usb_scan();
+    let others = usb::other_adb_devices(&scan, serial);
+    match usb::find_phone(&scan, serial) {
+        Some(phone) if !phone.adb => ctx.log.error(format_args!(
+            "phone is on USB but offers no ADB interface in this USB mode ({}); it cannot be \
+             reached or switched over ADB",
+            phone.describe()
+        )),
+        Some(phone) if ctx.host.tcp_listening(5037) => ctx.log.error(format_args!(
+            "phone offers ADB on USB ({}) but another ADB server is listening on \
+             127.0.0.1:5037 (a desktop `adb`, started by any `adb` command) and has most \
+             likely claimed it; only one server can hold the phone. Stop it with `adb kill-server` \
+             as the user who started it",
+            phone.describe()
+        )),
+        Some(phone) => ctx.log.warn(format_args!(
+            "phone offers ADB on USB but our ADB server cannot use it ({}): another ADB server \
+             (e.g. a desktop adb on port 5037) may hold it, or the phone has not authorized \
+             this host's key",
+            phone.describe()
+        )),
+        None if !others.is_empty() => ctx.log.error(format_args!(
+            "no USB device with the phone's serial, but ADB-capable device(s) are attached: {}; \
+             the phone may report a different serial or vendor ID in this USB mode",
+            others
+                .iter()
+                .map(|d| d.describe())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )),
+        None => ctx
+            .log
+            .warn("no USB device with the phone's serial is attached"),
     }
 }
 
@@ -53,44 +144,27 @@ pub fn wait_phone(ctx: &Ctx<'_>) -> Result<TransportId> {
 pub fn wait_usb(
     ctx: &Ctx<'_>,
     what: &str,
-    timeout: Duration,
     accept: impl Fn(&UsbEthernet) -> bool,
 ) -> Waited<(TransportId, UsbState)> {
-    wait_until(
-        ctx.clock,
-        ctx.log,
-        what,
-        timeout,
-        ctx.config.timing.poll_interval_secs.get(),
-        || {
-            let (transport, state) = adb::observe(ctx.adb, &ctx.config.phone.serial)?;
-            if accept(&state.ethernet) {
-                ctx.log.info(format_args!(
-                    "usb state read raw={} parsed={} transport={transport}",
-                    quote(&state.raw),
-                    state.ethernet
-                ));
-                Ok((transport, state))
-            } else {
-                Err(format!("raw={} parsed={}", state.raw, state.ethernet))
-            }
-        },
-    )
-}
-
-/// Time allowed for the phone to re-enumerate and report a changed state.
-fn usb_change_timeout(ctx: &Ctx<'_>) -> Duration {
-    ctx.config.timing.phone_timeout_secs.get() + ctx.config.timing.usb_state_timeout_secs.get()
+    wait_until(ctx.clock, ctx.log, what, limits::WAIT, limits::POLL, || {
+        ctx.usb.check(ctx, what);
+        let (transport, state) = adb::observe(ctx.adb, &ctx.config.phone.serial)?;
+        if accept(&state.ethernet) {
+            ctx.log.info(format_args!(
+                "usb state read raw={} parsed={} transport={transport}",
+                quote(&state.raw),
+                state.ethernet
+            ));
+            Ok((transport, state))
+        } else {
+            Err(format!("raw={} parsed={}", state.raw, state.ethernet))
+        }
+    })
 }
 
 /// Waits for a trustworthy (not unknown) USB state.
 pub fn wait_valid_usb(ctx: &Ctx<'_>) -> Result<(TransportId, UsbState)> {
-    match wait_usb(
-        ctx,
-        "usb-state",
-        ctx.config.timing.usb_state_timeout_secs.get(),
-        |e| !matches!(e, UsbEthernet::Unknown(_)),
-    ) {
+    match wait_usb(ctx, "usb-state", |e| !matches!(e, UsbEthernet::Unknown(_))) {
         Waited::Met { value, .. } => Ok(value),
         Waited::TimedOut { last, .. } => Err(Error::Control(format!(
             "cannot establish USB Ethernet state ({last}); no USB changes made"
@@ -145,9 +219,8 @@ fn turn_on(
     report.on_command = Some(send(ctx, transport, function.as_str()));
     if let Waited::Met {
         value: (_, state), ..
-    } = wait_usb(ctx, "usb-on", usb_change_timeout(ctx), |e| {
-        matches!(e, UsbEthernet::On(_))
-    }) {
+    } = wait_usb(ctx, "usb-on", |e| matches!(e, UsbEthernet::On(_)))
+    {
         report.on_observed = Some(state.raw);
         report.on_ms = Some((ctx.clock.now() - sent).as_millis());
     }
@@ -169,9 +242,7 @@ pub fn cycle(ctx: &Ctx<'_>, transport: TransportId, function: NetFunction) -> Re
     let mut report = ToggleReport::default();
     let sent = ctx.clock.now();
     report.off_command = Some(send(ctx, transport, &ctx.config.recovery.off_function));
-    let after_off = match wait_usb(ctx, "usb-off", usb_change_timeout(ctx), |e| {
-        *e == UsbEthernet::Off
-    }) {
+    let after_off = match wait_usb(ctx, "usb-off", |e| *e == UsbEthernet::Off) {
         Waited::Met {
             value: (transport, state),
             ..
@@ -219,7 +290,7 @@ pub struct WanTimeline {
 
 /// Waits for WAN to work, noting when the interface, address and probe
 /// each first succeeded.
-pub fn wait_wan(ctx: &Ctx<'_>, what: &str, timeout: Duration) -> WanTimeline {
+pub fn wait_wan(ctx: &Ctx<'_>, what: &str) -> WanTimeline {
     let start = ctx.clock.now();
     let mut timeline = WanTimeline {
         interface_ms: None,
@@ -228,32 +299,25 @@ pub fn wait_wan(ctx: &Ctx<'_>, what: &str, timeout: Duration) -> WanTimeline {
         last: WanHealth::NoInterface,
     };
     let interface = &ctx.config.wan.interface;
-    let _ = wait_until(
-        ctx.clock,
-        ctx.log,
-        what,
-        timeout,
-        ctx.config.timing.poll_interval_secs.get(),
-        || {
-            let health = wan_health(ctx.host, interface).map_err(|e| e.to_string())?;
-            let at = Some((ctx.clock.now() - start).as_millis());
-            if !matches!(health, WanHealth::NoInterface) && timeline.interface_ms.is_none() {
-                timeline.interface_ms = at;
-            }
-            if matches!(health, WanHealth::Up { .. } | WanHealth::ProbeFailed { .. })
-                && timeline.address_ms.is_none()
-            {
-                timeline.address_ms = at;
-            }
-            timeline.last = health.clone();
-            if health.is_up() {
-                timeline.up_ms = at;
-                Ok(())
-            } else {
-                Err(health.to_string())
-            }
-        },
-    );
+    let _ = wait_until(ctx.clock, ctx.log, what, limits::WAIT, limits::POLL, || {
+        let health = wan_health(ctx.host, interface).map_err(|e| e.to_string())?;
+        let at = Some((ctx.clock.now() - start).as_millis());
+        if !matches!(health, WanHealth::NoInterface) && timeline.interface_ms.is_none() {
+            timeline.interface_ms = at;
+        }
+        if matches!(health, WanHealth::Up { .. } | WanHealth::ProbeFailed { .. })
+            && timeline.address_ms.is_none()
+        {
+            timeline.address_ms = at;
+        }
+        timeline.last = health.clone();
+        if health.is_up() {
+            timeline.up_ms = at;
+            Ok(())
+        } else {
+            Err(health.to_string())
+        }
+    });
     timeline
 }
 
@@ -269,14 +333,30 @@ pub fn check_wan(ctx: &Ctx<'_>, label: &str) -> WanHealth {
     health
 }
 
-/// Checks WAN, waits the confirm interval, checks again; the second decides.
-pub fn final_checks(ctx: &Ctx<'_>) -> WanHealth {
-    check_wan(ctx, "final-1");
-    let interval = ctx.config.timing.confirm_interval_secs.get();
-    ctx.log
-        .info(format_args!("confirm interval secs={}", interval.as_secs()));
-    ctx.clock.sleep(interval);
-    check_wan(ctx, "final-2")
+/// Waits for the event that NetworkManager has finished with the WAN
+/// interface: connected or failed. Returns the last state seen.
+pub fn wait_nm_finished(ctx: &Ctx<'_>) -> NmState {
+    let interface = &ctx.config.wan.interface;
+    let mut last = NmState::Absent;
+    let _ = wait_until(
+        ctx.clock,
+        ctx.log,
+        "networkmanager",
+        limits::WAIT,
+        limits::POLL,
+        || {
+            last = ctx.host.nm_state(interface).map_err(|e| e.to_string())?;
+            if last.finished() {
+                Ok(())
+            } else {
+                Err(format!("state={last}"))
+            }
+        },
+    );
+    ctx.log.info(format_args!(
+        "networkmanager interface={interface} state={last}"
+    ));
+    last
 }
 
 /// One USB state read without waiting, for final summaries.

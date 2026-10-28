@@ -4,13 +4,15 @@ use crate::adb::usb_state::UsbEthernet;
 use crate::context::Ctx;
 use crate::error::{Exit, Result};
 use crate::log::quote;
+use crate::net::WanHealth;
+use crate::net::network_manager::NmState;
 use crate::record::Record;
 use crate::recovery::cycle::{
-    ToggleReport, check_wan, cycle, enable, final_checks, usb_now, wait_phone, wait_valid_usb,
+    ToggleReport, check_wan, cycle, enable, usb_now, wait_nm_finished, wait_phone, wait_valid_usb,
     wait_wan,
 };
 use crate::recovery::decision::{Decision, decide};
-use crate::units::readiness::wait_ready;
+use crate::units::readiness::check_ready;
 
 /// Facts for the final `result=...` line and the record.
 #[derive(Debug, Clone)]
@@ -85,30 +87,22 @@ pub fn run(ctx: &Ctx<'_>, record: Option<&Record>) -> Result<Exit> {
 fn flow(ctx: &Ctx<'_>, summary: &mut Summary) -> Result<Exit> {
     let config = ctx.config;
 
-    let stage = ctx.log.stage("readiness");
-    wait_ready(ctx)?;
-    stage.finish("ok");
+    // systemd started us after the readiness units (After= drop-in).
+    check_ready(ctx);
 
-    let stage = ctx.log.stage("initial-wan");
-    let initial = wait_wan(
-        ctx,
-        "initial-wan",
-        config.timing.initial_wan_timeout_secs.get(),
-    );
-    if initial.last.is_up() {
-        stage.finish("up");
+    let start = check_wan(ctx, "start");
+    if start.is_up() {
         summary.wan = "up";
         ctx.log
             .info("WAN healthy; no changes needed and ADB not started");
         return Ok(Exit::Success);
     }
-    stage.finish("down");
     summary.wan = "down";
     ctx.log.warn(format_args!(
-        "WAN unavailable after startup last=\"{}\"; inspecting the phone",
-        initial.last
+        "WAN down at start (\"{start}\"); asking the phone what state it is in"
     ));
 
+    ctx.usb.check(ctx, "start");
     let stage = ctx.log.stage("adb-server");
     ctx.adb.start_server()?;
     stage.finish("ok");
@@ -122,8 +116,7 @@ fn flow(ctx: &Ctx<'_>, summary: &mut Summary) -> Result<Exit> {
     summary.usb = usb.ethernet.word();
     stage.finish(usb.ethernet.word());
 
-    // WAN may have come back while ADB was starting.
-    let health = check_wan(ctx, "pre-action");
+    let health = judge_wan(ctx, &usb.ethernet);
     if health.is_up() {
         summary.wan = "up";
         ctx.log
@@ -179,30 +172,27 @@ fn flow(ctx: &Ctx<'_>, summary: &mut Summary) -> Result<Exit> {
             None
         }
     };
-    if let Some(report) = &report {
-        ctx.log.info(format_args!(
-            "action report off_observed={:?} off_ms={:?} on_observed={:?} on_ms={:?}",
-            report.off_observed, report.off_ms, report.on_observed, report.on_ms
-        ));
-        let stage = ctx.log.stage("wan-after-action");
-        let timeline = wait_wan(
-            ctx,
-            "wan-after-action",
-            config.timing.wan_timeout_secs.get(),
-        );
-        ctx.log.info(format_args!(
-            "wan timeline interface_ms={:?} address_ms={:?} up_ms={:?} last=\"{}\"",
-            timeline.interface_ms, timeline.address_ms, timeline.up_ms, timeline.last
-        ));
-        stage.finish(if timeline.last.is_up() { "up" } else { "down" });
-    }
-
-    let stage = ctx.log.stage("final-checks");
-    let last = final_checks(ctx);
+    // Without an action the WAN state judged above is the result.
+    let last = match &report {
+        None => health,
+        Some(report) => {
+            ctx.log.info(format_args!(
+                "action report off_observed={:?} off_ms={:?} on_observed={:?} on_ms={:?}",
+                report.off_observed, report.off_ms, report.on_observed, report.on_ms
+            ));
+            let stage = ctx.log.stage("wan-after-action");
+            let timeline = wait_wan(ctx, "wan-after-action");
+            ctx.log.info(format_args!(
+                "wan timeline interface_ms={:?} address_ms={:?} up_ms={:?} last=\"{}\"",
+                timeline.interface_ms, timeline.address_ms, timeline.up_ms, timeline.last
+            ));
+            stage.finish(if timeline.last.is_up() { "up" } else { "down" });
+            timeline.last
+        }
+    };
     let usb = usb_now(ctx);
     summary.usb = usb.word();
     summary.wan = if last.is_up() { "up" } else { "down" };
-    stage.finish(summary.wan);
 
     if last.is_up() {
         Ok(Exit::Success)
@@ -212,8 +202,27 @@ fn flow(ctx: &Ctx<'_>, summary: &mut Summary) -> Result<Exit> {
             other => other.to_string(),
         };
         ctx.log.error(format_args!(
-            "USB Ethernet {detail} but WAN unavailable after final check (\"{last}\"); stopping without further actions"
+            "USB Ethernet {detail} but WAN unavailable (\"{last}\"); stopping without further actions"
         ));
         Ok(Exit::Failed)
+    }
+}
+
+/// Judges the WAN once the phone's state is known. With USB Ethernet on,
+/// NetworkManager may still be bringing the interface up after boot, so
+/// wait for it to finish (connected or failed) instead of guessing a delay.
+/// With it off, nothing will bring the WAN up by itself: judge now.
+fn judge_wan(ctx: &Ctx<'_>, usb: &UsbEthernet) -> WanHealth {
+    if !matches!(usb, UsbEthernet::On(_)) {
+        return check_wan(ctx, "pre-action");
+    }
+    let stage = ctx.log.stage("networkmanager");
+    let nm = wait_nm_finished(ctx);
+    stage.finish(nm);
+    if nm == NmState::Connected {
+        // Connected: give the first packets a chance before calling it down.
+        wait_wan(ctx, "wan-connected").last
+    } else {
+        check_wan(ctx, "pre-action")
     }
 }

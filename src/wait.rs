@@ -92,6 +92,9 @@ impl<T> Waited<T> {
     }
 }
 
+/// How often an unchanged wait logs that it is still waiting.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Checks `condition` until it returns `Ok` or `timeout` passes, re-checking
 /// every `poll`. `condition` returns `Err(observation)` while not met; each
 /// change of observation is logged so waits are visible in the journal.
@@ -109,6 +112,7 @@ pub fn wait_until<T>(
         timeout.as_secs()
     ));
     let mut last: Option<String> = None;
+    let mut next_progress = PROGRESS_INTERVAL;
     loop {
         let elapsed = clock.now() - start;
         match condition() {
@@ -126,6 +130,17 @@ pub fn wait_until<T>(
                         quote(&observation),
                         elapsed.as_millis()
                     ));
+                } else if elapsed >= next_progress && elapsed < timeout {
+                    // A quiet journal during a long wait looks like a hang.
+                    log.info(format_args!(
+                        "wait still for={what} now={} elapsed_s={} remaining_s={}",
+                        quote(&observation),
+                        elapsed.as_secs(),
+                        timeout.saturating_sub(elapsed).as_secs()
+                    ));
+                }
+                while next_progress <= elapsed {
+                    next_progress += PROGRESS_INTERVAL;
                 }
                 if elapsed >= timeout {
                     log.warn(format_args!(
@@ -195,5 +210,23 @@ mod tests {
         let text = buffer.contents();
         assert_eq!(text.matches("wait observe").count(), 1);
         assert!(text.contains("result=timeout"));
+    }
+
+    #[test]
+    fn long_waits_log_progress_every_15_seconds() {
+        let clock = FakeClock::new();
+        let (log, buffer) = Log::memory();
+        let _: Waited<()> =
+            wait_until(&clock, &log, "initial-wan", SECOND * 90, SECOND * 2, || {
+                Err("down reason=no-interface".into())
+            });
+        let text = buffer.contents();
+        // At 16, 30, 46, 60, 76 s (polling every 2 s); not at the 90 s timeout.
+        assert_eq!(
+            text.matches("wait still for=initial-wan").count(),
+            5,
+            "{text}"
+        );
+        assert!(text.contains("elapsed_s=16 remaining_s=74"));
     }
 }

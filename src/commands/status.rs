@@ -10,6 +10,7 @@ use crate::error::{Exit, Result};
 use crate::net::network_manager::device_show_args;
 use crate::net::wan_health;
 use crate::process::{Cmd, run as run_cmd};
+use crate::usb;
 
 /// Prints the report to stdout. Exit 2 when any part could not be read.
 #[allow(
@@ -60,6 +61,11 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Exit> {
         }
     }
 
+    let _ = writeln!(out, "\n== USB devices (lsusb-style, by port) ==");
+    for device in ctx.host.usb_scan() {
+        let _ = writeln!(out, "{}", device.describe());
+    }
+
     let _ = writeln!(out, "\n== Phone ({}) ==", config.phone.serial.redacted());
     if let Err(e) = ctx.adb.start_server() {
         let _ = writeln!(out, "ADB server: {e}");
@@ -79,11 +85,22 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Exit> {
         Selection::Selected(transport) => transport,
         other => {
             let _ = writeln!(out, "phone: {}", other.problem().unwrap_or_default());
-            if ctx.host.usb_serial_present(&config.phone.serial) {
-                let _ = writeln!(
-                    out,
-                    "phone is attached on USB: check for another ADB server holding it, the udev rule, or authorization"
-                );
+            let scan = ctx.host.usb_scan();
+            match usb::find_phone(&scan, config.phone.serial.as_str()) {
+                Some(phone) if !phone.adb => {
+                    let _ = writeln!(
+                        out,
+                        "the phone (port {}) offers no ADB interface in its current USB mode",
+                        phone.port
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "no USB device with the phone's serial (see the USB list above)"
+                    );
+                }
             }
             ctx.adb.stop_server();
             return Ok(Exit::Failed);

@@ -131,7 +131,7 @@ pub fn render_unit() -> String {
 
 /// `systemd-run` arguments that run the manual test as a transient service
 /// with the boot service's settings. Never a timer.
-pub fn test_run_args() -> Vec<String> {
+pub fn test_run_args(subcommand: &str) -> Vec<String> {
     let mut args = vec![
         format!("--unit={TEST_UNIT}"),
         "--wait".into(),
@@ -147,7 +147,7 @@ pub fn test_run_args() -> Vec<String> {
         BINARY.into(),
         "--config".into(),
         config::DEFAULT_PATH.into(),
-        "test-usb-toggle".into(),
+        subcommand.into(),
         "--supervised".into(),
     ]);
     args
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_unit_shares_every_service_setting() {
-        let args = test_run_args();
+        let args = test_run_args("test-usb-toggle");
         for p in shared() {
             let wanted = format!("--property={}={}", p.key, p.value);
             assert!(args.contains(&wanted), "missing {wanted}");

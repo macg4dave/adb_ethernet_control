@@ -38,4 +38,11 @@ pub enum Command {
         #[arg(long, hide = true)]
         supervised: bool,
     },
+    /// Hardware test: with USB tethering switched off on the phone, wait for ADB
+    /// and enable rndis once, recording every step.
+    TestUsbEnable {
+        /// Internal: set when already running inside the transient unit.
+        #[arg(long, hide = true)]
+        supervised: bool,
+    },
 }

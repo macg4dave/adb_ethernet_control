@@ -2,7 +2,6 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -16,37 +15,6 @@ pub const DEFAULT_PATH: &str = "/etc/adb-ethernet-control/config.toml";
 
 /// The committed example, also the template `install` fills in.
 pub const EXAMPLE: &str = include_str!("../config/config.example.toml");
-
-/// The whole run must finish well inside the unit's `TimeoutStartSec=15min`.
-const MAX_TOTAL_WAIT: Duration = Duration::from_secs(13 * 60);
-
-/// A whole number of seconds between 1 and 3600.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "u64")]
-pub struct Secs(Duration);
-
-impl Secs {
-    /// The value as a duration.
-    pub fn get(self) -> Duration {
-        self.0
-    }
-
-    const fn of(secs: u64) -> Self {
-        Self(Duration::from_secs(secs))
-    }
-}
-
-impl TryFrom<u64> for Secs {
-    type Error = String;
-
-    fn try_from(value: u64) -> std::result::Result<Self, Self::Error> {
-        if (1..=3600).contains(&value) {
-            Ok(Self::of(value))
-        } else {
-            Err(format!("{value} seconds is out of range 1..=3600"))
-        }
-    }
-}
 
 /// All settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -62,9 +30,6 @@ pub struct Config {
     /// `[readiness]`
     #[serde(default)]
     pub readiness: Readiness,
-    /// `[timing]`
-    #[serde(default)]
-    pub timing: Timing,
     /// `[recovery]`
     #[serde(default)]
     pub recovery: Recovery,
@@ -93,9 +58,6 @@ pub struct Wan {
     /// Ping target.
     #[serde(default = "default_probe_host")]
     pub probe_host: Ipv4Addr,
-    /// Ping timeout.
-    #[serde(default = "default_probe_timeout")]
-    pub probe_timeout_secs: Secs,
 }
 
 /// `[adb]`
@@ -106,10 +68,6 @@ pub struct Adb {
     pub binary: PathBuf,
     /// Loopback port of our own ADB server.
     pub server_port: u16,
-    /// Timeout of each ADB client command.
-    pub command_timeout_secs: Secs,
-    /// How long the server may take to answer after starting.
-    pub server_start_timeout_secs: Secs,
     /// Start the server with the libusb backend.
     pub libusb: bool,
     /// HOME of the ADB server (holds the authorized key).
@@ -121,8 +79,6 @@ impl Default for Adb {
         Self {
             binary: "/usr/local/bin/adb".into(),
             server_port: 5038,
-            command_timeout_secs: Secs::of(10),
-            server_start_timeout_secs: Secs::of(15),
             libusb: true,
             home: "/var/lib/adb-wan".into(),
         }
@@ -133,48 +89,15 @@ impl Default for Adb {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Readiness {
-    /// Services that must be active before WAN is judged.
+    /// Services `adb-wan.service` is ordered after (`install` writes the
+    /// `After=` drop-in).
     pub units: Vec<String>,
-    /// How long to wait for them.
-    pub timeout_secs: Secs,
 }
 
 impl Default for Readiness {
     fn default() -> Self {
         Self {
             units: vec!["NetworkManager.service".into()],
-            timeout_secs: Secs::of(120),
-        }
-    }
-}
-
-/// `[timing]`
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Timing {
-    /// Re-check interval of every wait.
-    pub poll_interval_secs: Secs,
-    /// How long WAN may take to come up on its own after readiness.
-    pub initial_wan_timeout_secs: Secs,
-    /// How long to wait for the phone to be listed and authorized.
-    pub phone_timeout_secs: Secs,
-    /// How long to wait for a valid or changed USB state.
-    pub usb_state_timeout_secs: Secs,
-    /// How long WAN may take to work after a recovery action.
-    pub wan_timeout_secs: Secs,
-    /// Interval between the two final WAN checks.
-    pub confirm_interval_secs: Secs,
-}
-
-impl Default for Timing {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: Secs::of(2),
-            initial_wan_timeout_secs: Secs::of(90),
-            phone_timeout_secs: Secs::of(60),
-            usb_state_timeout_secs: Secs::of(30),
-            wan_timeout_secs: Secs::of(60),
-            confirm_interval_secs: Secs::of(10),
         }
     }
 }
@@ -237,10 +160,6 @@ fn default_probe_host() -> Ipv4Addr {
     Ipv4Addr::new(8, 8, 8, 8)
 }
 
-fn default_probe_timeout() -> Secs {
-    Secs::of(5)
-}
-
 impl Config {
     /// Reads, parses and validates the config file.
     pub fn load(path: &Path) -> Result<Self> {
@@ -294,36 +213,7 @@ impl Config {
                 "adb.server_port must be 1024 or higher".into(),
             ));
         }
-        if self.timing.poll_interval_secs.get() > Duration::from_secs(60) {
-            return Err(Error::Config(
-                "timing.poll_interval_secs must be at most 60".into(),
-            ));
-        }
-        let total = self.worst_case_run();
-        if total > MAX_TOTAL_WAIT {
-            return Err(Error::Config(format!(
-                "deadlines add up to {}s; keep them under {}s so the unit's 15 minute limit is never hit",
-                total.as_secs(),
-                MAX_TOTAL_WAIT.as_secs()
-            )));
-        }
         Ok(())
-    }
-
-    /// Upper bound of one boot run's waits, used to keep it inside the unit
-    /// timeout.
-    pub fn worst_case_run(&self) -> Duration {
-        let t = &self.timing;
-        let phone_and_state = t.phone_timeout_secs.get() + t.usb_state_timeout_secs.get();
-        self.readiness.timeout_secs.get()
-            + t.initial_wan_timeout_secs.get()
-            + self.adb.server_start_timeout_secs.get()
-            + phone_and_state
-            // off then on, each with re-selection and a state wait
-            + phone_and_state * 2
-            + t.wan_timeout_secs.get()
-            + t.confirm_interval_secs.get()
-            + self.wan.probe_timeout_secs.get() * 2
     }
 }
 
@@ -384,17 +274,16 @@ mod tests {
         assert!(!config.recovery.usb_cycle_enabled);
         assert_eq!(config.recovery.off_function, "mtp");
         assert_eq!(config.adb.server_port, 5038);
-        assert!(config.worst_case_run() <= MAX_TOTAL_WAIT);
     }
 
     #[test]
     fn rejects_bad_values_with_key_names() {
         let cases = [
-            (format!("{MINIMAL}[timing]\nbogus = 1\n"), "bogus"),
             (
-                format!("{MINIMAL}[timing]\nphone_timeout_secs = 0\n"),
-                "out of range",
+                format!("{MINIMAL}[timing]\npoll_interval_secs = 2\n"),
+                "timing",
             ),
+            (format!("{MINIMAL}[adb]\nbogus = 1\n"), "bogus"),
             (
                 format!("{MINIMAL}[recovery]\noff_function = \"\"\n"),
                 "off_function",
@@ -414,10 +303,6 @@ mod tests {
             (
                 format!("{MINIMAL}[readiness]\nunits = [\"x; rm\"]\n"),
                 "invalid unit",
-            ),
-            (
-                format!("{MINIMAL}[timing]\nwan_timeout_secs = 3600\n"),
-                "add up to",
             ),
             (
                 "[phone]\nserial = \"a b\"\n[wan]\ninterface = \"usb0\"\n".into(),

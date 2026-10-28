@@ -27,8 +27,10 @@ logging; the program owns logic and reads all settings from its TOML file.
   the two cannot drift. A Rust test asserts they match.
 - Start: `WantedBy=multi-user.target`, ordered
   `After=network-online.target NetworkManager.service` with `Wants=` on both.
-  Readiness of LAN services (from config `[readiness]`) is waited for by the
-  program, because their names are host-specific and units must not be.
+  LAN services from config `[readiness]` are host-specific, so `install`
+  writes them as an `After=` drop-in (`adb-wan.service.d/10-readiness.conf`):
+  systemd does the waiting, the program only checks and logs. Never `Wants=`
+  them: the program must not start LAN services.
 - Do **not** start the service from udev (`SYSTEMD_WANTS=`): USB
   re-enumeration during recovery would start it again and risk a cycle loop.
 - No fixed delays anywhere in the unit (`ExecStartPre=sleep`, etc.). The

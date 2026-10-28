@@ -5,6 +5,7 @@ pub mod check;
 pub mod install;
 pub mod restore;
 pub mod status;
+pub mod usb_enable;
 pub mod usb_toggle;
 
 use std::path::Path;
@@ -18,6 +19,7 @@ use crate::error::{Exit, Result};
 use crate::host::RealHost;
 use crate::log::{Log, quote};
 use crate::record::{Record, boot_id};
+use crate::recovery::cycle::UsbWatch;
 use crate::recovery::marker::Markers;
 use crate::wait::SystemClock;
 
@@ -26,13 +28,27 @@ pub fn run(cli: &Cli, log: &Log) -> Result<Exit> {
     let flow = match &cli.command {
         Command::Install(args) => return install::run(log, &cli.config, args),
         Command::TestUsbToggle { supervised: false } => {
-            return usb_toggle::launch(&Config::load(&cli.config)?, log);
+            return usb_toggle::launch(
+                &Config::load(&cli.config)?,
+                log,
+                "test-usb-toggle",
+                "test-toggle-",
+            );
+        }
+        Command::TestUsbEnable { supervised: false } => {
+            return usb_toggle::launch(
+                &Config::load(&cli.config)?,
+                log,
+                "test-usb-enable",
+                "test-enable-",
+            );
         }
         Command::Status => Flow::Status,
         Command::Check => Flow::Check,
         Command::Boot => Flow::Boot,
         Command::Restore => Flow::Restore,
         Command::TestUsbToggle { supervised: true } => Flow::Test,
+        Command::TestUsbEnable { supervised: true } => Flow::TestEnable,
     };
     let config = Config::load(&cli.config)?;
     let record = flow
@@ -43,6 +59,7 @@ pub fn run(cli: &Cli, log: &Log) -> Result<Exit> {
     let adb = RealAdb::new(&config.adb, account::adb_server_identity());
     let host = RealHost::new(&config);
     let markers = Markers::new(&config.paths.runtime_dir);
+    let usb_watch = UsbWatch::default();
     let ctx = Ctx {
         config: &config,
         adb: &adb,
@@ -50,6 +67,7 @@ pub fn run(cli: &Cli, log: &Log) -> Result<Exit> {
         clock: &SystemClock,
         log,
         markers: &markers,
+        usb: &usb_watch,
     };
     match flow {
         Flow::Status => status::run(&ctx),
@@ -57,6 +75,7 @@ pub fn run(cli: &Cli, log: &Log) -> Result<Exit> {
         Flow::Boot => boot::run(&ctx, record.as_ref()),
         Flow::Restore => restore::run(&ctx),
         Flow::Test => usb_toggle::run(&ctx, record.as_ref()),
+        Flow::TestEnable => usb_enable::run(&ctx, record.as_ref()),
     }
 }
 
@@ -68,6 +87,7 @@ enum Flow {
     Boot,
     Restore,
     Test,
+    TestEnable,
 }
 
 impl Flow {
@@ -78,6 +98,7 @@ impl Flow {
             Self::Boot => "boot",
             Self::Restore => "restore",
             Self::Test => "test-usb-toggle",
+            Self::TestEnable => "test-usb-enable",
         }
     }
 
@@ -87,7 +108,8 @@ impl Flow {
             Self::Status | Self::Check => None,
             Self::Boot => Some("boot"),
             Self::Restore => Some("restore"),
-            Self::Test => Some("test"),
+            Self::Test => Some("test-toggle"),
+            Self::TestEnable => Some("test-enable"),
         }
     }
 }

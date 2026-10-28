@@ -13,17 +13,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adb_ethernet_control::adb::Adb;
-use adb_ethernet_control::adb::device::{Serial, TransportId};
+use adb_ethernet_control::adb::device::TransportId;
 use adb_ethernet_control::adb::usb_state::NetFunction;
-use adb_ethernet_control::commands::{boot, restore};
+use adb_ethernet_control::commands::{boot, restore, usb_enable};
 use adb_ethernet_control::config::Config;
 use adb_ethernet_control::context::Ctx;
 use adb_ethernet_control::error::{Error, Exit, Result};
 use adb_ethernet_control::host::Host;
 use adb_ethernet_control::log::{Log, LogBuffer};
 use adb_ethernet_control::net::interface::{InterfaceName, InterfaceStatus};
+use adb_ethernet_control::net::network_manager::NmState;
 use adb_ethernet_control::process::CommandOutput;
+use adb_ethernet_control::recovery::cycle::UsbWatch;
 use adb_ethernet_control::recovery::marker::Markers;
+use adb_ethernet_control::usb::UsbDevice;
 use adb_ethernet_control::wait::FakeClock;
 
 const CONFIG: &str = "[phone]\nserial = \"FAKE0SERIAL\"\n[wan]\ninterface = \"usb0\"\n";
@@ -41,7 +44,14 @@ struct World {
     /// Whether turning USB Ethernet on brings working WAN.
     wan_follows_usb: bool,
     attached_on_usb: bool,
+    /// Whether the phone's current USB mode includes an ADB interface.
+    adb_interface: bool,
+    /// A desktop ADB server listens on 5037.
+    desktop_adb: bool,
     unit_active: bool,
+    /// NetworkManager reports "busy" for this many more queries, then the
+    /// connection completes (address + working WAN).
+    nm_busy_polls: u32,
     iface: bool,
     ipv4: bool,
     probe: bool,
@@ -59,7 +69,10 @@ impl World {
             on_takes_effect: true,
             wan_follows_usb: true,
             attached_on_usb: true,
+            adb_interface: true,
+            desktop_adb: false,
             unit_active: true,
+            nm_busy_polls: 0,
             iface: true,
             ipv4: true,
             probe: true,
@@ -152,8 +165,49 @@ impl Host for Fake {
         Ok(self.0.borrow().probe)
     }
 
-    fn usb_serial_present(&self, _serial: &Serial) -> bool {
-        self.0.borrow().attached_on_usb
+    fn nm_state(&self, _name: &InterfaceName) -> Result<NmState> {
+        let mut w = self.0.borrow_mut();
+        if w.iface && w.nm_busy_polls > 0 {
+            w.nm_busy_polls -= 1;
+            if w.nm_busy_polls == 0 {
+                w.ipv4 = true;
+                w.probe = true;
+            }
+            return Ok(NmState::Busy(70));
+        }
+        Ok(match (w.iface, w.ipv4) {
+            (false, _) => NmState::Absent,
+            (true, true) => NmState::Connected,
+            // Present without an address: DHCP failed.
+            (true, false) => NmState::Failed,
+        })
+    }
+
+    fn tcp_listening(&self, port: u16) -> bool {
+        port == 5037 && self.0.borrow().desktop_adb
+    }
+
+    fn usb_scan(&self) -> Vec<UsbDevice> {
+        let w = self.0.borrow();
+        if !w.attached_on_usb {
+            return Vec::new();
+        }
+        vec![UsbDevice {
+            port: "7-2".into(),
+            vendor: "339b".into(),
+            product: if w.iface { "108a" } else { "107d" }.into(),
+            manufacturer: "HONOR".into(),
+            name: "ALI-NX1".into(),
+            serial: "FAKE0SERIAL".into(),
+            interfaces: if w.adb_interface {
+                vec!["ff4201".into()]
+            } else {
+                vec!["060101".into()]
+            },
+            adb: w.adb_interface,
+            node: "/dev/bus/usb/007/023 owner=0:966 mode=0660".into(),
+            ..UsbDevice::default()
+        }]
     }
 }
 
@@ -169,13 +223,6 @@ impl Run {
         match &self.outcome {
             Ok(exit) => *exit,
             Err(e) => panic!("expected an exit, got error {e}\n{}", self.log),
-        }
-    }
-
-    fn error(&self) -> String {
-        match &self.outcome {
-            Ok(exit) => panic!("expected an error, got {exit:?}"),
-            Err(e) => e.to_string(),
         }
     }
 
@@ -215,6 +262,7 @@ fn run_with(
     let (log, buffer): (Log, LogBuffer) = Log::memory();
     let dir = markers_dir(name);
     let markers = Markers::new(&dir);
+    let usb_watch = UsbWatch::default();
     prepare(&markers);
     let ctx = Ctx {
         config: &config,
@@ -223,6 +271,7 @@ fn run_with(
         clock: &clock,
         log: &log,
         markers: &markers,
+        usb: &usb_watch,
     };
     let exit = flow(&ctx);
     assert!(!world.borrow().server_started, "ADB server left running");
@@ -274,6 +323,26 @@ fn usb_off_is_enabled_once_and_wan_recovers() {
     );
     assert_eq!(run.markers().acted_this_boot().as_deref(), Some("enable"));
     assert_eq!(run.markers().restore_pending(), None);
+}
+
+#[test]
+fn usb_identity_change_is_logged_as_before_and_after() {
+    let world = World::healthy().wan_down().usb("mtp,adb");
+    let run = boot_run("usb-change", world, "");
+    assert!(
+        run.log
+            .contains("usb scan at=start devices=1: port=7-2 339b:107d"),
+        "{}",
+        run.log
+    );
+    assert!(
+        run.log.contains(
+            "usb change at=usb-on removed=[port=7-2 339b:107d \"HONOR ALI-NX1\" serial=…RIAL interfaces=ff4201"
+        ),
+        "{}",
+        run.log
+    );
+    assert!(run.log.contains("added=[port=7-2 339b:108a"), "{}", run.log);
 }
 
 #[test]
@@ -361,6 +430,26 @@ fn absent_phone_is_a_control_failure_with_a_hint() {
         run.log
     );
     assert!(run.summary().contains("result=error"));
+    assert!(
+        run.log.contains("phone_usb=port=7-2 339b:107d"),
+        "kernel view missing:\n{}",
+        run.log
+    );
+}
+
+#[test]
+fn phone_mode_without_adb_interface_is_named_in_the_log() {
+    let mut world = World::healthy().wan_down().usb("mtp,adb");
+    world.listed = false;
+    world.adb_interface = false;
+    let run = boot_run("no-adb-interface", world, "");
+    assert!(run.outcome.is_err());
+    assert!(run.commands().is_empty());
+    assert!(
+        run.log.contains("offers no ADB interface in this USB mode"),
+        "{}",
+        run.log
+    );
 }
 
 #[test]
@@ -374,14 +463,45 @@ fn unknown_usb_state_is_never_acted_on() {
 }
 
 #[test]
-fn readiness_timeout_stops_before_adb() {
-    let mut world = World::healthy().wan_down();
+fn inactive_readiness_unit_is_logged_not_waited_for() {
+    let mut world = World::healthy().wan_down().usb("mtp,adb");
     world.unit_active = false;
-    world.server_fails = true;
     let run = boot_run("readiness", world, "");
-    let err = run.error();
-    assert!(err.contains("host services not ready"), "{err}");
-    assert!(run.commands().is_empty());
+    assert!(
+        run.log
+            .contains("readiness units not active: NetworkManager.service")
+    );
+    assert_eq!(run.exit(), Exit::Success);
+    assert_eq!(run.commands(), ["rndis"]);
+}
+
+#[test]
+fn usb_on_while_networkmanager_still_connecting_waits_for_it_and_changes_nothing() {
+    let mut world = World::healthy().wan_down();
+    world.iface = true;
+    world.nm_busy_polls = 5;
+    let run = boot_run("nm-busy", world, CYCLE_ON);
+    assert_eq!(run.exit(), Exit::Success);
+    assert!(
+        run.commands().is_empty(),
+        "never cycle while NetworkManager is still working"
+    );
+    assert!(
+        run.log
+            .contains("networkmanager interface=usb0 state=connected")
+    );
+    assert!(run.summary().contains("result=healthy-no-action"));
+}
+
+#[test]
+fn usb_off_is_acted_on_without_any_waiting() {
+    let world = World::healthy().wan_down().usb("mtp,adb");
+    let run = boot_run("no-wait", world, "");
+    // The phone said "off": nothing in the log may come from a wait before the action.
+    let log = &run.log;
+    let action = log.find("action setFunctions").unwrap();
+    assert!(!log[..action].contains("wait still"), "{log}");
+    assert!(!log[..action].contains("networkmanager"), "{log}");
 }
 
 #[test]
@@ -398,13 +518,11 @@ fn every_stage_logs_its_end() {
     let world = World::healthy().wan_down().usb("mtp,adb");
     let run = boot_run("stages", world, "");
     for stage in [
-        "readiness",
-        "initial-wan",
         "adb-server",
         "phone",
         "usb-state",
         "enable",
-        "final-checks",
+        "wan-after-action",
     ] {
         assert!(
             run.log.contains(&format!("stage end name={stage} ")),
@@ -435,4 +553,73 @@ fn pending_restore_reenables_and_clears() {
     assert_eq!(run.exit(), Exit::Success);
     assert_eq!(run.commands(), ["rndis"], "enable only, never off");
     assert_eq!(run.markers().restore_pending(), None);
+}
+
+#[test]
+fn enable_test_waits_for_adb_then_sends_rndis_once() {
+    let world = World::healthy().wan_down().usb("mtp,adb");
+    let run = run_with("enable-test", world, "", |_| {}, enable_test);
+    assert_eq!(run.exit(), Exit::Success);
+    assert_eq!(run.commands(), ["rndis"]);
+    assert!(
+        run.log
+            .contains("test status=\"passed\" on_observed=\"rndis,adb\"")
+    );
+    assert!(run.log.contains("before_usb_state=\"mtp,adb\""));
+}
+
+#[test]
+fn enable_test_repeats_even_after_boot_acted() {
+    let world = World::healthy().wan_down().usb("mtp,adb");
+    let run = run_with(
+        "enable-test-repeat",
+        world,
+        "",
+        |m| m.mark_acted("enable").unwrap(),
+        enable_test,
+    );
+    assert_eq!(run.commands(), ["rndis"]);
+}
+
+#[test]
+fn enable_test_with_tethering_on_changes_nothing() {
+    let run = run_with("enable-test-on", World::healthy(), "", |_| {}, enable_test);
+    assert_eq!(run.exit(), Exit::Failed);
+    assert!(run.commands().is_empty());
+    assert!(run.log.contains("test status=\"skipped\""));
+}
+
+#[test]
+fn enable_test_without_adb_says_why() {
+    let mut world = World::healthy().wan_down().usb("mtp,adb");
+    world.listed = false;
+    world.adb_interface = false;
+    let run = run_with("enable-test-no-adb", world, "", |_| {}, enable_test);
+    assert!(run.outcome.is_err());
+    assert!(run.commands().is_empty());
+    assert!(run.log.contains("offers no ADB interface in this USB mode"));
+}
+
+/// The enable test body plus what its `supervised` wrapper does afterwards.
+fn enable_test(ctx: &Ctx<'_>) -> Result<Exit> {
+    let outcome = usb_enable::test(ctx, None);
+    ctx.adb.stop_server();
+    outcome
+}
+
+#[test]
+fn desktop_adb_server_holding_the_phone_is_named() {
+    let mut world = World::healthy().wan_down().usb("mtp,adb");
+    world.listed = false;
+    world.desktop_adb = true;
+    let run = boot_run("desktop-adb", world, "");
+    assert!(run.outcome.is_err());
+    assert!(run.commands().is_empty());
+    assert!(
+        run.log
+            .contains("another ADB server is listening on 127.0.0.1:5037"),
+        "{}",
+        run.log
+    );
+    assert!(run.log.contains("adb kill-server"));
 }

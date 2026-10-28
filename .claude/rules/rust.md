@@ -127,13 +127,17 @@ Rules:
   condition: unit active, transport `device`, valid `sys.usb.state`,
   interface present, global IPv4 present, probe passing.
 - Use one helper, `wait_until(condition, deadline)`, for every wait. It checks
-  the condition, then re-checks at `timing.poll_interval_secs` until true
-  or the deadline passes. It returns which happened; it never loops forever.
+  the condition, then re-checks every `limits::POLL` until true or the
+  safety limit passes. It returns which happened; it never loops forever.
   Prefer a blocking primitive when one exists (e.g. `adb wait-for-usb-device`
   under a timeout) over polling.
-- Deadlines come from `Config` with documented defaults, never magic numbers.
-  The only intentional pause is the post-recovery confirm interval
-  (`confirm_interval_secs`), which is a stability check, not a settle delay.
+- **No timing settings and no grace periods.** Decide from what is observed
+  (phone USB state, NetworkManager device state, probe), never from "wait N
+  seconds then judge". Those were Bash-era guesses.
+- The only time values are fixed safety limits in `src/limits.rs`: a wait
+  ends when its event happens; a limit is reached only if it never does.
+  They are not config keys. `limits::boot_worst_case()` must stay inside the
+  unit's `TimeoutStartSec=` (a test checks it).
 - Inject a `Clock` in flows so tests run instantly.
 
 ## Configuration
@@ -144,9 +148,9 @@ Rules:
 - `config.rs` deserializes it once at startup into typed structs with
   `#[serde(deny_unknown_fields)]`, then validates (ranges, non-empty serial,
   interface name format). Errors name the key and the bad value.
-- Group keys into tables by area (`[phone]`, `[wan]`, `[adb]`, `[timing]`,
-  `[recovery]`, `[readiness]`, `[logging]`). Durations are integer seconds
-  with a `_secs` suffix and convert to `Duration` at load.
+- Group keys into tables by area (`[phone]`, `[wan]`, `[adb]`,
+  `[readiness]`, `[recovery]`, `[paths]`). There is no `[timing]` table and
+  no duration keys; see "Time and waiting".
 - Every optional key has a documented default in code and in the committed
   example `config/config.example.toml`; keep the two in sync (a unit test
   parses the example).

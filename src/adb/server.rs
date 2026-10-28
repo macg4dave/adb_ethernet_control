@@ -8,6 +8,7 @@ use super::Adb;
 use super::device::TransportId;
 use crate::config;
 use crate::error::{Error, Result};
+use crate::limits;
 use crate::process::{Cmd, CommandOutput, run, spawn};
 
 /// How often a starting server is checked.
@@ -33,7 +34,7 @@ impl RealAdb {
     }
 
     fn client(&self) -> Cmd {
-        Cmd::new(&self.config.binary, self.config.command_timeout_secs.get())
+        Cmd::new(&self.config.binary, limits::ADB_COMMAND)
             .args(["-H", "127.0.0.1", "-P"])
             .arg(self.config.server_port.to_string())
             .env_remove("ADB_SERVER_SOCKET")
@@ -59,7 +60,7 @@ impl Adb for RealAdb {
             server = server.env("ADB_LIBUSB", "1");
         }
         let mut child = spawn(&server)?;
-        let deadline = Instant::now() + self.config.server_start_timeout_secs.get();
+        let deadline = Instant::now() + limits::ADB_SERVER_START;
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(Error::Control(format!(
@@ -75,7 +76,7 @@ impl Adb for RealAdb {
                 let _ = child.wait();
                 return Err(Error::Control(format!(
                     "ADB server did not answer within {}s",
-                    self.config.server_start_timeout_secs.get().as_secs()
+                    limits::ADB_SERVER_START.as_secs()
                 )));
             }
             std::thread::sleep(START_POLL);

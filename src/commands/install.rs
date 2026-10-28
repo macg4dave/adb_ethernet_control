@@ -17,8 +17,9 @@ use crate::error::{Error, Exit, Result};
 use crate::host::{RealHost, interfaces_of_usb, usb_devices};
 use crate::log::Log;
 use crate::net::interface::InterfaceName;
-use crate::recovery::cycle::{wait_phone, wait_valid_usb};
+use crate::recovery::cycle::{UsbWatch, wait_phone, wait_valid_usb};
 use crate::recovery::marker::Markers;
+use crate::units::readiness;
 use crate::units::service::{BINARY, UNIT_NAME, UNIT_PATH, render_unit};
 use crate::wait::SystemClock;
 
@@ -26,35 +27,11 @@ const SYSUSERS_PATH: &str = "/etc/sysusers.d/adb-wan.conf";
 const SYSUSERS: &str = "# adb-wan: runs phone WAN recovery (adb-wan.service).\n\
                         u adb-wan - \"ADB WAN recovery\" /var/lib/adb-wan /usr/sbin/nologin\n";
 const UDEV_PATH: &str = "/etc/udev/rules.d/70-adb-wan.rules";
+const DROP_IN_PATH: &str = "/etc/systemd/system/adb-wan.service.d/10-readiness.conf";
 const SYSTEMD_SYSUSERS: &str = "/usr/bin/systemd-sysusers";
 const UDEVADM: &str = "/usr/bin/udevadm";
 const RESTORECON: &str = "/usr/sbin/restorecon";
 const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
-/// Units of the removed Bash version. Its timer would otherwise still run
-/// the old recovery at boot, and its server would hold port 5038.
-const LEGACY_UNITS: [&str; 4] = [
-    "adb-wan-recover.timer",
-    "adb-wan-recover.service",
-    "adb-wan-server.service",
-    "adb-wan-test@.service",
-];
-/// Files the Bash version installed. Its logs in /var/log are kept as evidence.
-const LEGACY_PATHS: [&str; 12] = [
-    "/etc/systemd/system/adb-wan-recover.timer",
-    "/etc/systemd/system/adb-wan-recover.service",
-    "/etc/systemd/system/adb-wan-server.service",
-    "/etc/systemd/system/adb-wan-test@.service",
-    "/usr/local/bin/adb-wan-boot",
-    "/usr/local/bin/adb-wan-test",
-    "/usr/local/bin/adb-wan-recover",
-    "/usr/local/bin/adb-wan-host-cycle",
-    "/usr/local/bin/adb-ethernet-control",
-    "/usr/local/bin/adb-wan-local-check",
-    "/etc/adb-ethernet-control/boot.env",
-    "/etc/adb-ethernet-control/wan-recovery.env",
-];
-/// Generous: the user may need to unlock the phone and accept the prompt.
-const PHONE_WAIT: Duration = Duration::from_secs(120);
 
 /// How the service user gets an ADB key the phone trusts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -159,19 +136,6 @@ pub fn run(log: &Log, config_path: &Path, args: &InstallArgs) -> Result<Exit> {
         log,
         dry_run: args.dry_run,
     };
-    let legacy: Vec<&str> = LEGACY_PATHS
-        .into_iter()
-        .filter(|p| Path::new(p).exists())
-        .collect();
-    if !legacy.is_empty() {
-        installer.step(
-            &format!(
-                "retire the old Bash install: disable/stop its units, remove {}",
-                legacy.join(" ")
-            ),
-            || remove_legacy(log, &config, &legacy),
-        )?;
-    }
     installer.step(
         &format!("create system user {USER} ({SYSUSERS_PATH})"),
         || {
@@ -217,13 +181,25 @@ pub fn run(log: &Log, config_path: &Path, args: &InstallArgs) -> Result<Exit> {
         &format!("prepare {} and the ADB key", config.adb.home.display()),
         || prepare_home(log, &config.adb.home, ids, args),
     )?;
-    installer.step(&format!("write {UNIT_PATH} and reload systemd"), || {
-        write_file(Path::new(UNIT_PATH), &render_unit(), 0o644, None)?;
-        tool(
-            &config.paths.systemctl.display().to_string(),
-            &["daemon-reload"],
-        )
-    })?;
+    installer.step(
+        &format!(
+            "write {UNIT_PATH} and {DROP_IN_PATH} (After= {}) and reload systemd",
+            config.readiness.units.join(" ")
+        ),
+        || {
+            write_file(Path::new(UNIT_PATH), &render_unit(), 0o644, None)?;
+            write_file(
+                Path::new(DROP_IN_PATH),
+                &readiness::drop_in(&config.readiness.units),
+                0o644,
+                None,
+            )?;
+            tool(
+                &config.paths.systemctl.display().to_string(),
+                &["daemon-reload"],
+            )
+        },
+    )?;
     installer.step("check the phone is reachable as the service user", || {
         verify_phone(log, &config, ids)
     })?;
@@ -424,27 +400,6 @@ fn relabel(path: &Path) {
     }
 }
 
-fn remove_legacy(log: &Log, config: &Config, paths: &[&str]) -> Result<()> {
-    let systemctl = config.paths.systemctl.display().to_string();
-    for unit in LEGACY_UNITS {
-        // Missing or template units fail here; that is fine, the files go next.
-        if let Err(e) = tool(&systemctl, &["disable", "--now", unit]) {
-            log.debug(format_args!("legacy unit {unit}: {e}"));
-        }
-    }
-    for path in paths {
-        let path = Path::new(path);
-        let removed = if path.is_dir() {
-            fs::remove_dir_all(path)
-        } else {
-            fs::remove_file(path)
-        };
-        removed.map_err(|e| Error::io(format!("removing {}", path.display()), e))?;
-        log.info(format_args!("removed {}", path.display()));
-    }
-    tool(&systemctl, &["daemon-reload"])
-}
-
 fn install_binary() -> Result<()> {
     let current = std::env::current_exe().map_err(|e| Error::io("finding this program", e))?;
     let target = Path::new(BINARY);
@@ -497,8 +452,8 @@ fn prepare_home(log: &Log, home: &Path, ids: Option<(u32, u32)>, args: &InstallA
             "no existing key found; a new one will be generated; accept the prompt on the phone",
         );
     }
-    // The Bash version ran its ADB server as root here; hand everything
-    // (key, known hosts, ...) to the service user.
+    // An existing directory may hold files from an earlier root-run server;
+    // hand everything (key, known hosts, ...) to the service user.
     own_tree(home, ids).map_err(context)?;
     relabel(home);
     Ok(())
@@ -535,17 +490,16 @@ fn sudo_user_key() -> Option<PathBuf> {
 fn verify_phone(log: &Log, config: &Config, ids: Option<(u32, u32)>) -> Result<()> {
     let adb = RealAdb::new(&config.adb, ids);
     let host = RealHost::new(config);
-    let mut patient = config.clone();
-    patient.timing.phone_timeout_secs =
-        config::Secs::try_from(PHONE_WAIT.as_secs()).map_err(Error::Config)?;
     let markers = Markers::new(std::env::temp_dir());
+    let usb_watch = UsbWatch::default();
     let ctx = Ctx {
-        config: &patient,
+        config,
         adb: &adb,
         host: &host,
         clock: &SystemClock,
         log,
         markers: &markers,
+        usb: &usb_watch,
     };
     log.info("if the phone asks \"Allow USB debugging?\", unlock it and tap Allow (tick \"Always allow\")");
     adb.start_server()?;

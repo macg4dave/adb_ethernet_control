@@ -13,8 +13,10 @@ removed; see [what was learned](docs/legacy-findings.md).
 - One binary, `adb-wan`. One config file,
   `/etc/adb-ethernet-control/config.toml`. One service, `adb-wan.service`,
   running once per boot as the system user `adb-wan`.
-- No timers: it waits for NetworkManager (and any services you list), then
-  for the WAN. Every wait has a deadline.
+- No timers or grace periods. systemd starts it after NetworkManager and any
+  services you list; then it acts on what it sees: WAN up → nothing to do;
+  USB Ethernet off → enable now; on → wait for NetworkManager to finish, then
+  judge.
 - A healthy WAN is never touched and ADB is not even started.
 - If WAN is down, it starts its own ADB server, reads the phone's
   `sys.usb.state` and takes at most one action per boot:
@@ -23,6 +25,19 @@ removed; see [what was learned](docs/legacy-findings.md).
     `recovery.usb_cycle_enabled = true` (off by default).
 - If a run dies during an off/on, the service's `ExecStopPost=` re-enables
   USB Ethernet.
+
+## Phone setup (required)
+
+In the phone's Developer options:
+
+- **USB debugging**: on.
+- **Allow ADB debugging in charge only mode**: on. Without it, this HONOR
+  phone turns ADB off together with USB tethering, and nothing can switch
+  tethering back on. Unplug and replug the cable after changing it.
+- Accept **Allow USB debugging** for this computer with **Always allow**.
+
+Do not leave another ADB server running on the host (a desktop `adb` on port
+5037): only one server can hold the phone. Stop it with `adb kill-server`.
 
 ## Install
 
@@ -33,9 +48,9 @@ sudo ./target/release/adb-wan install
 ```
 
 The installer detects the phone serial and interface, asks you to confirm,
-retires the old Bash install, creates the `adb-wan` user, hands it the ADB
-key the phone already trusts, writes the config, udev rule and unit, checks
-the phone is reachable, and enables the service.
+creates the `adb-wan` user, hands it the ADB key the phone already trusts,
+writes the config, udev rule and unit, checks the phone is reachable, and
+enables the service.
 
 ## Use
 
@@ -43,6 +58,7 @@ the phone is reachable, and enables the service.
 adb-wan status                       # read-only report
 adb-wan check                        # WAN health: exit 0 up, 2 down
 sudo adb-wan test-usb-toggle         # hardware test: USB Ethernet off, then on, recorded
+sudo adb-wan test-usb-enable         # hardware test: switch tethering off first; waits for ADB, enables rndis
 journalctl -b -t adb-wan             # what the boot run did
 ls /var/log/adb-wan/                 # per-run records (boot-*, test-*, restore-*)
 ```
