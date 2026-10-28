@@ -1,3 +1,0 @@
-# Headless access for the boot service; uaccess alone depends on a local login.
-# Match HONOR ADB interfaces across product-ID changes during a USB cycle.
-SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="339b", ENV{ID_USB_INTERFACES}=="*:ff4201:*", GROUP="adbwan", MODE="0660"

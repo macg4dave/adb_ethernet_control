@@ -1,0 +1,125 @@
+---
+paths:
+  - "systemd/**"
+  - "udev/**"
+  - "sysusers/**"
+---
+
+# systemd rules
+
+There is exactly **one** unit: `systemd/system/adb-wan.service`. It runs the
+program once per boot as the dedicated system user `adb-wan`. systemd owns
+ordering, supervision, privileges, directories, the outer time limit and
+logging; the program owns logic and reads all settings from its TOML file.
+
+## One service, no timers
+
+- No other units: no `.timer`, `.path`, `.socket`, separate ADB server
+  service, `@` templates or user units. No `systemd-run` transient timers.
+  Ask the user before adding any unit.
+- The single exception is the manual hardware test: `adb-wan
+  test-usb-toggle` launches itself once as a transient **service**
+  (`systemd-run --unit=adb-wan-test --wait`, never `--on-*`). Its properties
+  are built in Rust from the same list used to render `adb-wan.service`
+  (user, directories, capabilities, hardening, `ExecStopPost=` restore), so
+  the two cannot drift. A Rust test asserts they match.
+- Start: `WantedBy=multi-user.target`, ordered
+  `After=network-online.target NetworkManager.service` with `Wants=` on both.
+  Readiness of LAN services (from config `[readiness]`) is waited for by the
+  program, because their names are host-specific and units must not be.
+- Do **not** start the service from udev (`SYSTEMD_WANTS=`): USB
+  re-enumeration during recovery would start it again and risk a cycle loop.
+- No fixed delays anywhere in the unit (`ExecStartPre=sleep`, etc.). The
+  program waits on conditions.
+- The program starts its ADB server as a child inside this service's cgroup,
+  so stopping the service always stops the server.
+
+## Independent restore (`ExecStopPost=`)
+
+- `ExecStopPost=/usr/local/bin/adb-wan --config ... restore` is the fallback
+  that survives the main process crashing, hanging past `TimeoutStartSec=`,
+  or being killed. It is enable-only and acts only if the "restore pending"
+  marker exists in `/run/adb-wan/`.
+- It may read systemd's `$SERVICE_RESULT`, `$EXIT_CODE`, `$EXIT_STATUS` for
+  logging (they are not settings).
+- `RuntimeDirectory=adb-wan` with `RuntimeDirectoryPreserve=yes` so the
+  marker and the once-per-boot guard survive until reboot and are visible
+  to `ExecStopPost=`. `/run` is cleared at boot, which resets both.
+- `TimeoutStopSec=` must cover the restore's own deadlines.
+
+## Settings
+
+- The unit passes only `--config /etc/adb-ethernet-control/config.toml`.
+  No `EnvironmentFile=`, no `${VAR}` expansion. The only `Environment=`
+  allowed is `HOME=/var/lib/adb-wan` (ADB needs it; it is not a setting).
+- No serials, interface names, usernames or other host-specific values in any
+  committed file. They belong in the TOML file.
+- `ExecStart=` / `ExecStopPost=` are absolute paths plus fixed arguments.
+  No `/bin/sh -c`, pipes or `&&`. Binaries live in `/usr/local/bin` with
+  correct SELinux labels (`restorecon`), never in a home directory
+  (that failed with `203/EXEC`).
+
+## System user and permissions
+
+- `User=adb-wan`, `Group=adb-wan`, a system account with no login shell,
+  declared in `sysusers/adb-wan.conf` (installed to
+  `/etc/sysusers.d/`, applied with `systemd-sysusers`). Not `DynamicUser=`:
+  the ADB key and the udev group need a stable UID/GID.
+- ADB keys and server state: `StateDirectory=adb-wan` (`/var/lib/adb-wan`),
+  which is also `HOME`. The phone must authorize this key once (see
+  "Users and privileges" in `AGENTS.md`).
+- USB access: a udev rule in `udev/70-adb-wan.rules` sets the phone's USB
+  device to `GROUP="adb-wan", MODE="0660"`, matching vendor `339b` and the
+  ADB interface (`ID_USB_INTERFACES` contains `:ff4201:`), not the product ID.
+  The rule only sets permissions; it never starts anything.
+- No NetworkManager write access and no polkit rules: the program only
+  observes the host interface.
+- Interface-bound ping: `AmbientCapabilities=CAP_NET_RAW` and
+  `CapabilityBoundingSet=CAP_NET_RAW`. Nothing else.
+- Config file `/etc/adb-ethernet-control/config.toml` is `root:adb-wan 0640`;
+  the service can read it, not change it.
+- Never fall back to `User=root` to make something work; find the specific
+  permission. Supporting files are limited to `udev/` and `sysusers/`;
+  ask before adding others.
+
+## Unit behavior
+
+- `Type=oneshot`, `RemainAfterExit=yes`: runs once per boot.
+- **No restart**: no `Restart=`.
+- `TimeoutStartSec=` is the outer bound; the program's deadlines must add up
+  to less.
+- Exit code `2` (WAN still down) must show as `failed`. Do not hide it with
+  `SuccessExitStatus=` or `-` prefixes.
+- `StateDirectory=`, `LogsDirectory=adb-wan`, `RuntimeDirectory=` with
+  explicit `*Mode=` instead of creating directories in code.
+- Logs go to the journal via stderr; `SyslogIdentifier=adb-wan`. Persistent
+  per-run records go in `LogsDirectory=`, written by the program.
+- Comment non-obvious directives with *why* (often a hardware finding from
+  `docs/legacy-findings.md`).
+
+## Hardening
+
+- Baseline: `NoNewPrivileges=yes`, `UMask=0077`, `PrivateTmp=yes`,
+  `ProtectSystem=strict`, `ProtectHome=yes`, `ProtectKernelTunables=yes`,
+  `ProtectKernelModules=yes`, `ProtectControlGroups=yes`,
+  `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `RestrictRealtime=yes`.
+- Do **not** add `PrivateDevices=yes`, `PrivateNetwork=yes`,
+  `PrivateUsers=yes`, `IPAddressDeny=`, or `RestrictAddressFamilies=` without
+  `AF_UNIX AF_NETLINK AF_INET AF_INET6`: they break USB, ADB, D-Bus or ping.
+  Check each directive against the real flow; don't add by habit.
+- Review with `systemd-analyze security adb-wan.service` on the host and
+  record accepted exposures in a comment.
+
+## Validation
+
+- A Rust test reads the committed unit, udev and sysusers files as text and
+  asserts these rules (single service, `--config` only, `ExecStopPost=`
+  restore present, no `Restart=`, no timers, no `EnvironmentFile=`,
+  `User=adb-wan`, hardening present, forbidden directives absent).
+  Tests never call `systemd-analyze`, `systemctl` or `udevadm`.
+- `systemd-analyze verify` / `security` are manual checks on the host, done
+  when the user asks.
+- Never `systemctl enable/start/daemon-reload` or touch the user manager
+  without the user's explicit request.
+- After changing these files, state what still needs verifying on the host
+  (e.g. "attended reboot", "`ExecStopPost=` restore with the program killed").

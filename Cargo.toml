@@ -1,0 +1,33 @@
+[package]
+name = "adb-ethernet-control"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Recover a USB-tethered Android phone WAN after host startup"
+publish = false
+
+[[bin]]
+name = "adb-wan"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
