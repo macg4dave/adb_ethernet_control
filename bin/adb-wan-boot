@@ -16,23 +16,22 @@ READINESS_TIMEOUT=${READINESS_TIMEOUT:-120}
 STARTUP_DELAY=${STARTUP_DELAY:-15}
 POLL_INTERVAL=${POLL_INTERVAL:-3}
 PROBE_TIMEOUT=${PROBE_TIMEOUT:-5}
+POST_ENABLE_DELAY=${POST_ENABLE_DELAY:-20}
+CONNECTION_TIMEOUT=${CONNECTION_TIMEOUT:-45}
 USB_FUNCTION=${USB_FUNCTION:-rndis}
 if [[ "$mode" == --restore ]]; then USB_FUNCTION=$2; fi
 USB_CYCLE_ENABLED=${USB_CYCLE_ENABLED:-0}
 BOOT_ENV_FILE=${BOOT_ENV_FILE:-/etc/adb-ethernet-control/boot.env}
-PROBE_URLS=${PROBE_URLS:-https://1.1.1.1/cdn-cgi/trace https://1.0.0.1/cdn-cgi/trace}
 [[ "$USB_FUNCTION" == rndis || "$USB_FUNCTION" == ncm ]] || exit 1
 [[ "$USB_CYCLE_ENABLED" == 0 || "$USB_CYCLE_ENABLED" == 1 ]] || exit 1
-for name in ADB_SERVER_PORT ADB_TIMEOUT PHONE_TIMEOUT READINESS_TIMEOUT STARTUP_DELAY POLL_INTERVAL PROBE_TIMEOUT; do
+for name in ADB_SERVER_PORT ADB_TIMEOUT PHONE_TIMEOUT READINESS_TIMEOUT STARTUP_DELAY POLL_INTERVAL PROBE_TIMEOUT POST_ENABLE_DELAY CONNECTION_TIMEOUT; do
     [[ "${!name}" =~ ^[1-9][0-9]{0,3}$ ]] || exit 1
 done
 ((ADB_SERVER_PORT <= 65535)) || exit 1
-for tool in systemctl timeout curl ip flock; do command -v "$tool" >/dev/null; done
+for tool in systemctl timeout ping ip flock; do command -v "$tool" >/dev/null; done
 read -r -a units <<< "$READY_UNITS"
-read -r -a urls <<< "$PROBE_URLS"
-((${#units[@]} && ${#urls[@]})) || exit 1
+((${#units[@]})) || exit 1
 for unit in "${units[@]}"; do [[ "$unit" =~ ^[a-zA-Z0-9_.@:-]+\.service$ ]] || exit 1; done
-for url in "${urls[@]}"; do [[ "$url" == https://* ]] || exit 1; done
 log() { printf '%s boot-wan: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 fail() { log "ERROR: $*"; exit 1; }
 # Called indirectly by wait_for.
@@ -41,16 +40,14 @@ ready() {
     local unit
     for unit in "${units[@]}"; do timeout --kill-after=2s 5s systemctl is-active --quiet "$unit" || return 1; done
 }
-healthy() {
-    local url code
+# Called indirectly by wait_for as well as healthy.
+host_connected() {
     timeout --kill-after=2s 5s ip -4 -o address show dev "$WAN_INTERFACE" scope global 2>/dev/null | grep -q ' inet ' || return 1
-    for url in "${urls[@]}"; do
-        code=$(curl --disable --ipv4 --noproxy '*' --interface "$WAN_INTERFACE" --silent \
-            --output /dev/null --write-out '%{http_code}' --connect-timeout "$PROBE_TIMEOUT" \
-            --max-time "$PROBE_TIMEOUT" "$url") || continue
-        [[ "$code" == 200 ]] && return 0
-    done
-    return 1
+}
+healthy() {
+    host_connected || return 1
+    timeout --kill-after=2s "${PROBE_TIMEOUT}s" ping -4 -n -I "$WAN_INTERFACE" \
+        -c 1 -W "$PROBE_TIMEOUT" 8.8.8.8 >/dev/null 2>&1
 }
 wait_for() {
     local budget=$1 deadline
@@ -61,7 +58,13 @@ wait_for() {
         sleep "$POLL_INTERVAL"
     done
 }
-adb_run() { timeout --kill-after=2s "${ADB_TIMEOUT}s" "$ADB_BIN" -P "$ADB_SERVER_PORT" "$@"; }
+adb_run() {
+    local server_args=()
+    # An explicit host prevents ADB from auto-spawning a root-owned server while
+    # systemd's user-owned server is still opening its listener.
+    if [[ -n ${ADB_SERVER_UNIT-adb-wan-server.service} ]]; then server_args=(-H 127.0.0.1); fi
+    timeout --kill-after=2s "${ADB_TIMEOUT}s" "$ADB_BIN" "${server_args[@]}" -P "$ADB_SERVER_PORT" "$@"
+}
 # Resolve a USB transport ID afresh after every re-enumeration. Never fall back to TCP.
 # shellcheck disable=SC2317
 select_phone() {
@@ -86,16 +89,23 @@ phone() {
     select_phone || return 1
     adb_run -t "$transport" shell -T -n "$@"
 }
+# Vendors add functions (HONOR boots as hisuite,mtp,mass_storage,adb), so judge the set.
+# Called indirectly by wait_for.
+# shellcheck disable=SC2317
 usb_state() {
-    local state
-    state=$(phone getprop sys.usb.state) || return 1
+    local state fn adb=false net=''
+    state=$(phone getprop sys.usb.state) || { phone_problem='USB state read failed'; return 1; }
     state=${state//$'\r'/}
-    case "$state" in
-        rndis,adb|adb,rndis) usb=on; USB_FUNCTION=rndis ;;
-        ncm,adb|adb,ncm) usb=on; USB_FUNCTION=ncm ;;
-        adb|mtp,adb|adb,mtp|ptp,adb|adb,ptp|midi,adb|adb,midi) usb=off ;;
-        *) phone_problem='unrecognized USB state or ADB function missing'; return 1 ;;
-    esac
+    [[ "$state" =~ ^[a-z0-9_]+(,[a-z0-9_]+)*$ ]] || { phone_problem='malformed or empty USB state'; return 1; }
+    for fn in ${state//,/ }; do
+        case "$fn" in
+            adb) adb=true ;;
+            rndis|ncm) [[ -z "$net" ]] || { phone_problem="ambiguous USB state $state"; return 1; }; net=$fn ;;
+        esac
+    done
+    "$adb" || { phone_problem="ADB function missing from USB state $state"; return 1; }
+    if [[ -n "$net" ]]; then usb=on; USB_FUNCTION=$net; else usb=off; fi
+    usb_raw=$state
 }
 enable_usb() {
     # svc manages ADB separately; never request adb in its setFunctions mask.
@@ -107,6 +117,7 @@ prepare_adb() {
     local server_unit=${ADB_SERVER_UNIT-adb-wan-server.service}
     if [[ -n "$server_unit" ]]; then
         [[ "$server_unit" =~ ^[a-zA-Z0-9_.@:-]+\.service$ ]] || fail 'Invalid ADB server unit.'
+        log 'Starting dedicated ADB server; waiting for authorized USB transport.'
         timeout --kill-after=2s 15s systemctl start "$server_unit" || fail 'Dedicated ADB server failed to start.'
     fi
     wait_for "$PHONE_TIMEOUT" select_phone || fail "$phone_problem; no USB changes made."
@@ -114,7 +125,7 @@ prepare_adb() {
 if [[ "$mode" == --restore ]]; then
     # Independent systemd fallback: no coordinator lock and no off command.
     prepare_adb
-    usb_state || fail 'Fallback cannot read USB state.'
+    wait_for "$PHONE_TIMEOUT" usb_state || fail "Fallback cannot read USB state: $phone_problem."
     if [[ "$usb" == off ]]; then enable_usb || fail 'Fallback enable command failed.'; fi
     log 'Independent restore finished; USB Ethernet enable requested if needed.'
     exit 0
@@ -135,12 +146,15 @@ if healthy; then
 elif "$manual_test"; then
     fail 'Manual USB toggle test requires a healthy WAN baseline; no changes made.'
 fi
+log 'WAN unavailable after startup; inspecting phone USB Ethernet.'
 prepare_adb
-usb_state || fail 'Cannot establish phone USB Ethernet state; no USB changes made.'
+wait_for "$PHONE_TIMEOUT" usb_state || fail "Cannot establish phone USB Ethernet state: $phone_problem; no USB changes made."
+log "Observed USB Ethernet: $usb ($usb_raw)."
 if "$manual_test" && [[ "$usb" != on ]]; then fail 'Manual USB toggle test requires USB Ethernet on; no changes made.'; fi
 # Catch connectivity returning while ADB becomes ready.
 if ! "$manual_test" && healthy; then log 'WAN recovered before USB changes; no changes needed.'; exit 0; fi
 pending=false
+recovery_requested=false
 off_verified=false
 fallback="adb-wan-usb-restore-$BASHPID"
 # Called by EXIT; leave the independent restore armed if confirmation is unavailable.
@@ -155,6 +169,7 @@ trap 'exit 143' TERM HUP
 trap 'exit 130' INT
 if [[ "$usb" == off ]]; then
     log "USB Ethernet off; enabling $USB_FUNCTION once."
+    recovery_requested=true
     enable_usb || log 'Enable response failed or was lost; checking actual WAN state.'
 elif "$manual_test" || [[ "$USB_CYCLE_ENABLED" == 1 ]]; then
     # The explicit manual test is separate from the automatic recovery gate.
@@ -183,6 +198,7 @@ elif "$manual_test" || [[ "$USB_CYCLE_ENABLED" == 1 ]]; then
     fi
     # A non-network USB function avoids requesting charging-only mode. Vendor behavior
     # and continued ADB access still require hardware verification before enabling.
+    recovery_requested=true
     phone svc usb setFunctions mtp || log 'Off response failed or was lost; proceeding to restore.'
     sleep 1
     if wait_for "$PHONE_TIMEOUT" select_phone; then
@@ -198,6 +214,11 @@ elif "$manual_test" || [[ "$USB_CYCLE_ENABLED" == 1 ]]; then
     fi
 else
     log 'USB cycle skipped: independent phone restoration has not been verified.'
+fi
+if "$recovery_requested"; then
+    log "Waiting ${POST_ENABLE_DELAY}s for phone tethering, then up to ${CONNECTION_TIMEOUT}s for host IPv4 on $WAN_INTERFACE."
+    sleep "$POST_ENABLE_DELAY"
+    wait_for "$CONNECTION_TIMEOUT" host_connected || log 'Host IPv4 connection not ready; continuing to final WAN checks.'
 fi
 log 'Checking WAN after recovery decision.'
 healthy && first=healthy || first=unhealthy

@@ -34,7 +34,9 @@ chmod +x "$scratch/bin/"*
 grep -Fxq 'WAN_INTERFACE=testwan0' "$MOCK_CONFIG"
 grep -Fxq "PHONE_SERIAL=$PHONE_SERIAL" "$MOCK_CONFIG"
 grep -Fxq 'USB_CYCLE_ENABLED=0' "$MOCK_CONFIG"
-awk '/systemd-analyze verify/ { verified=1 } /systemctl restart/ { if (!verified) exit 1; started=1 } /systemctl enable/ { if (!started) exit 1; enabled=1 } END { if (!enabled) exit 1 }' "$MOCK_LOG"
+grep -Fxq 'POST_ENABLE_DELAY=20' "$MOCK_CONFIG"
+grep -Fxq 'CONNECTION_TIMEOUT=45' "$MOCK_CONFIG"
+awk '/systemd-analyze verify/ { verified=1 } /systemctl stop adb-wan-recover.service adb-wan-server.service/ { if (!verified) exit 1; stopped=1 } /systemctl restart/ { if (!stopped) exit 1; started=1 } /systemctl enable/ { if (!started) exit 1; enabled=1 } END { if (!enabled) exit 1 }' "$MOCK_LOG"
 : > "$MOCK_LOG"
 code=0
 MOCK_FAIL_START=1 ./scripts/install-boot-service > "$scratch/output" 2>&1 || code=$?

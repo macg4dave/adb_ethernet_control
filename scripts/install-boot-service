@@ -18,7 +18,7 @@ substate=$(systemctl show adb-wan-recover.service -p SubState --value)
 case "$substate" in start*|running|stop*) printf 'Service is busy; wait for it to finish.\n' >&2; exit 1 ;; esac
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-printf 'WAN_INTERFACE=%s\nPHONE_SERIAL=%s\nREADY_UNITS="%s"\nUSB_CYCLE_ENABLED=0\nADB_BIN=%s\nADB_SERVER_PORT=5038\nADB_LIBUSB=1\nUSB_FUNCTION=rndis\n' \
+printf 'WAN_INTERFACE=%s\nPHONE_SERIAL=%s\nREADY_UNITS="%s"\nUSB_CYCLE_ENABLED=0\nADB_BIN=%s\nADB_SERVER_PORT=5038\nADB_LIBUSB=1\nUSB_FUNCTION=rndis\nPOST_ENABLE_DELAY=20\nCONNECTION_TIMEOUT=45\nPROBE_TIMEOUT=5\n' \
     "$WAN_INTERFACE" "$PHONE_SERIAL" "$ready_units" "$adb_bin" > "$scratch/boot.env"
 service=$(<"$repo/systemd/system/adb-wan-recover.service")
 service=${service//Group=dave/Group=$group}
@@ -42,6 +42,9 @@ if command -v restorecon >/dev/null; then
 fi
 sudo systemd-analyze verify /etc/systemd/system/adb-wan-recover.service
 sudo systemctl daemon-reload
+# Clear any legacy auto-spawned ADB process in the recovery unit's cgroup,
+# then let recovery start the dedicated server only if WAN needs it.
+sudo systemctl stop adb-wan-recover.service adb-wan-server.service
 sudo systemctl restart adb-wan-recover.service
 sudo systemctl enable adb-wan-recover.service
 systemctl is-enabled adb-wan-recover.service

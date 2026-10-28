@@ -20,7 +20,9 @@ complexity warrants it. No Rust runtime or build is required today.
 6. If USB Ethernet is off, enable the configured RNDIS/NCM function once. If
    it is on but WAN is down, cycle off/on once with a one-second pause, only
    after independent restoration has been verified and cycling enabled.
-7. Check WAN, wait ten seconds, and check again. On final failure, log one
+7. After enabling, allow 20 seconds for tethering and up to 45 seconds for
+   host IPv4 addressing. Ping `8.8.8.8` through the phone interface, wait ten
+   seconds, and ping again. On final failure, log one
    error with the USB state and stop without further cycles.
 
 The boot service does not repeatedly reset a phone during a carrier outage.
@@ -31,7 +33,8 @@ profiles. NetworkManager remains responsible for addressing and route setup.
 
 During inspection on 28 October 2026:
 
-- HONOR ALI-NX1 runs Android 15 and exposes `rndis,adb`.
+- HONOR ALI-NX1 runs Android 15 and exposes `rndis,adb` when tethering; Android init also defines vendor sets
+  such as `hisuite,mtp,mass_storage,adb` and `mtp,adb,hdb`.
 - NetworkManager uses `honor-usb-wan` on `enp48s0f4u2`, with autoconnect and
   IPv4 DHCP enabled.
 - `pc101-technitium.service` is the running LAN DNS/DHCP service.
@@ -90,7 +93,27 @@ successful automatic recovery. The evidence does not establish why tethering
 was disabled across the reboot. Host-side NetworkManager reconnection cannot
 restore a network interface that the phone does not expose.
 
+The attended manual USB toggle test on 28 October 2026 at 18:58:57 GMT
+passed in 30 seconds, with no manual intervention confirmed by the user.
+The system-managed test observed USB Ethernet off and on, retained authorized
+ADB after re-enumeration, and recorded healthy WAN at the final check ten
+seconds after the first failed check. Its independent restore timer was armed
+but canceled before firing. This verifies one MTP/RNDIS cycle on the phone;
+the fallback's actual restoration path remains unverified, so automatic cycling
+stays disabled. See [the hardware record](offline-testing.md#explicit-usb-toggle-test).
+
 Automatic WAN recovery and unattended cold-boot behavior have **not** been verified.
+
+The later reboot at 19:07 GMT on 28 October also needed manual tethering
+enablement, confirmed by the user. Its boot record began with no WAN interface
+and ended with `WAN recovered before USB changes`; no enable command was sent.
+A root-owned ADB daemon had started in the recovery service while the dedicated
+user-owned server repeatedly failed to bind port 5038. Recovery now uses an
+explicit loopback ADB host to prevent client auto-spawning, retries discovery
+while the dedicated server starts, and logs the observed USB state. Mock tests
+cover delayed server availability and startup failure. The corrected startup
+path still requires deployment and attended reboot validation.
+
 Changing USB functions is not the same API as changing the Settings tethering
 switch. This phone must be tested to establish that cycling RNDIS causes its
 tethering service and DHCP server to recover, and that ADB survives the cycle.

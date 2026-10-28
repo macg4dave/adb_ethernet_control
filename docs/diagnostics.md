@@ -88,6 +88,28 @@ prompt appears, reconnect the USB cable with the phone unlocked and USB
 debugging enabled. A visible ADB interface alone does not mean the computer
 has been authorized.
 
+## Safe user unit verification
+
+Use `./scripts/check` for validation, or
+`./scripts/verify-user-units /absolute/path/to/example.service` to verify user
+units separately. The wrapper uses a private temporary runtime directory,
+isolated user configuration and unit paths, disabled generators, and disconnected
+bus addresses. It removes the temporary directory on success or failure.
+On this host, verification can print `Failed to connect to system bus: No such
+file or directory` because that bus is deliberately disconnected; the command's
+exit status still determines whether unit validation passed.
+
+On 28 October 2026, the original `scripts/check` invoked
+`systemd-analyze --user verify` with the login session's `XDG_RUNTIME_DIR`.
+An isolated reproduction on this host's systemd 257 build showed verification
+replacing `$XDG_RUNTIME_DIR/systemd/private` with its own socket and leaving it
+without a listener on exit. Terminal shell launches then reported
+`Failed to connect to user scope bus via local transport: Connection refused`.
+The user restored access by restarting `user@1000.service`. That restart can
+terminate desktop applications and shells; it is not part of validation or the
+fix. The regression test checks that verification preserves a caller's private
+socket stand-in and cleans up its isolated runtime on success and failure.
+
 ## Optional systemd user timer
 
 Install explicitly after checking the CLI works:

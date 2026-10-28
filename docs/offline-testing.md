@@ -200,6 +200,19 @@ cat /var/log/adb-wan-usb-test/run-XXXXXXXX/output.log
 journalctl -u 'adb-wan-usb-restore-*'
 ```
 
+The attended test on 28 October 2026 at 18:58:57–18:59:27 GMT passed
+under the system manager, with no manual intervention confirmed by the user.
+The healthy baseline passed, the independent timer was armed, USB Ethernet off
+was observed after the MTP request, and RNDIS plus ADB returned after the on
+request. The first WAN check failed; the final check ten seconds later passed.
+Both USB command responses reported failure or were lost, so the observed USB
+states and WAN probes establish the result. The final snapshot showed the WAN
+profile connected, an IPv4 address and default route, and authorized USB ADB.
+An additional interface-bound HTTPS probe returned 200 after completion.
+The host-local record is `/var/log/adb-wan-usb-test/run-Dw2J6vsx/`.
+The fallback timer was canceled before firing; independent fallback restoration
+and unattended boot recovery remain unverified. Automatic cycling stays disabled.
+
 ### Earlier phone-side outage tests
 
 Keeping a test running offline does not make an unreliable phone toggle safe.

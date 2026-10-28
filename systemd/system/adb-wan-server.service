@@ -3,7 +3,7 @@ Description=Dedicated ADB server for phone WAN recovery
 After=systemd-udevd.service
 
 [Service]
-Type=simple
+Type=exec
 User=dave
 SupplementaryGroups=adbwan
 Environment=HOME=/home/dave
@@ -13,7 +13,6 @@ Environment=ADB_SERVER_PORT=5038
 Environment=ADB_LIBUSB=1
 EnvironmentFile=/etc/adb-ethernet-control/boot.env
 ExecStart=/usr/bin/env ${ADB_BIN} -L tcp:localhost:${ADB_SERVER_PORT} server nodaemon
-Restart=on-failure
-RestartSec=5s
+Restart=no
 UMask=0077
 NoNewPrivileges=true
